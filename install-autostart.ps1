@@ -2,21 +2,20 @@ param(
     [string]$Exe = "",
     [switch]$Remove
 )
-# Register (or remove) the bridge so it starts with Windows, minimized.
+# Register (or remove) mcp-hands so it starts with Windows, minimized.
+# mcp-hands — https://github.com/huocai250/mcp-hands — MIT License
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $Exe) {
     $candidates = @(
-        (Join-Path $here "release\aiyu-mcp-bridge\aiyu-mcp-bridge.exe"),
-        (Join-Path $here "release\aiyu-mcp-bridge.exe"),
-        (Join-Path $here "dist\aiyu-mcp-bridge\aiyu-mcp-bridge.exe"),
-        (Join-Path $here "dist\aiyu-mcp-bridge.exe")
+        (Join-Path $here "release\mcp-hands\mcp-hands.exe"),
+        (Join-Path $here "release\mcp-hands.exe")
     )
     $Exe = ($candidates | Where-Object { Test-Path $_ } | Select-Object -First 1)
 }
 if (-not $Exe) { Write-Error "exe not found; build it first (build-exe.ps1) or pass -Exe"; exit 1 }
 
 $startup = [Environment]::GetFolderPath("Startup")
-$lnk = Join-Path $startup "aiyu-mcp-bridge.lnk"
+$lnk = Join-Path $startup "mcp-hands.lnk"
 
 if ($Remove) {
     Remove-Item $lnk -Force -ErrorAction SilentlyContinue

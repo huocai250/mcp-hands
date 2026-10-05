@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""aiyu MCP 桥接控制台 — a tkinter control panel around bridge.py.
+"""mcp-hands control panel — a tkinter GUI around bridge.py.  https://github.com/huocai250/mcp-hands (MIT)
 
 Modes (decided from the command line):
   --mcp-server NAME     run one bundled MCP stdio server (used by bridge.py itself)
@@ -18,6 +18,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import webbrowser
 
 FROZEN = bool(getattr(sys, "frozen", False))
 BASE_DIR = os.path.dirname(os.path.abspath(sys.executable)) if FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -62,7 +63,7 @@ def hide_console():
             pass
 
 
-CLI_FLAGS = ("--tools", "--self-test", "--doctor")
+CLI_FLAGS = ("--tools", "--self-test", "--doctor", "--version")
 
 
 def main():
@@ -86,6 +87,18 @@ from tkinter import (BOTH, END, HORIZONTAL, LEFT, RIGHT, VERTICAL, W, X, Y, Bool
                      StringVar, Tk, Toplevel, filedialog, messagebox, scrolledtext, ttk)
 
 SETTINGS_PATH = os.path.join(BASE_DIR, "gui-settings.json")
+
+ABOUT_TEXT = """%(name)s  v%(version)s
+
+%(tagline)s
+
+作者   : %(author)s
+仓库   : %(url)s
+协议   : %(license)s License（可自由使用、修改、商用，保留版权声明即可）
+
+当前工具：%(tools)s 个 / %(servers)s 个 MCP server
+配置示例：configs/bridge.config.example.json
+命令行 : --tools  --self-test  --doctor  --version  --init  --mcp-server <name>"""
 
 SERVERS = ("fs", "shell", "web", "sys", "office", "media", "archive", "sqlite",
            "desktop", "voice", "monitor", "net", "dev", "forensics",
@@ -111,7 +124,7 @@ class _Writer:
 class Console(Tk):
     def __init__(self, run_server=False):
         super().__init__()
-        self.title("aiyu MCP 桥接控制台")
+        self.title("%s · aiyu MCP 桥接控制台" % bridge.APP_NAME)
         self.geometry(self._load_settings().get("geometry") or "860x860")
         self.minsize(520, 380)
         self.server = None
@@ -178,7 +191,8 @@ class Console(Tk):
         for text, cmd in (("工具清单", lambda: self.run_cmd("tools")),
                           ("自检", lambda: self.run_cmd("self-test")),
                           ("体检", lambda: self.run_cmd("doctor")),
-                          ("测试对话", self.test_chat)):
+                          ("测试对话", self.test_chat),
+                          ("关于", self.show_about)):
             ttk.Button(bar, text=text, command=cmd).pack(side=LEFT, padx=(0, 6))
         ttk.Button(bar, text="清空日志", command=self.clear_log).pack(side=RIGHT)
         ttk.Button(bar, text="打开日志", command=self.open_log).pack(side=RIGHT, padx=6)
@@ -267,8 +281,45 @@ class Console(Tk):
         self.log = scrolledtext.ScrolledText(log_box, height=10, wrap="none", font=("Consolas", 9))
         self.log.pack(fill=BOTH, expand=True)
         ttk.Button(log_box, text="日志单独窗口", command=self.detach_log).pack(anchor="e", pady=(4, 0))
+        version = ttk.Label(log_box, text=bridge.version_line(), foreground="#888")
+        version.pack(anchor="w")
+        version.bind("<Button-1>", lambda _e: webbrowser.open(bridge.APP_URL))
         self._load_config_into_ui()
         self.after(300, self._init_sash)
+
+    def show_about(self):
+        """作者 / 仓库 / 协议 信息，链接可点。"""
+        hub = bridge.HUB
+        text = ABOUT_TEXT % {
+            "name": bridge.APP_NAME, "version": bridge.APP_VERSION, "tagline": bridge.APP_TAGLINE,
+            "author": bridge.APP_AUTHOR, "url": bridge.APP_URL, "license": bridge.APP_LICENSE,
+            "tools": len(hub.specs) if hub else "261+", "servers": len(hub.servers) if hub else len(SERVERS),
+        }
+        win = Toplevel(self)
+        win.title("关于 %s" % bridge.APP_NAME)
+        win.geometry("560x320")
+        win.transient(self)
+        frame = ttk.Frame(win, padding=14)
+        frame.pack(fill=BOTH, expand=True)
+        ttk.Label(frame, text="%s v%s" % (bridge.APP_NAME, bridge.APP_VERSION),
+                  font=("Microsoft YaHei UI", 14, "bold")).pack(anchor=W)
+        ttk.Label(frame, text=bridge.APP_TAGLINE, foreground="#555").pack(anchor=W, pady=(2, 10))
+        body = ttk.Label(frame, text=text.split("\n", 2)[2], justify=LEFT)
+        body.pack(anchor=W)
+        link = ttk.Label(frame, text=bridge.APP_URL, foreground="#0a58ca", cursor="hand2")
+        link.pack(anchor=W, pady=(8, 0))
+        link.bind("<Button-1>", lambda _e: webbrowser.open(bridge.APP_URL))
+        buttons = ttk.Frame(frame)
+        buttons.pack(side="bottom", fill=X, pady=(10, 0))
+        ttk.Button(buttons, text="打开 GitHub 仓库", command=lambda: webbrowser.open(bridge.APP_URL)).pack(side=LEFT)
+        ttk.Button(buttons, text="复制仓库地址", command=self.copy_repo_url).pack(side=LEFT, padx=8)
+        ttk.Button(buttons, text="关闭", command=win.destroy).pack(side=RIGHT)
+        self.say("关于：%s" % bridge.version_line())
+
+    def copy_repo_url(self):
+        self.clipboard_clear()
+        self.clipboard_append(bridge.APP_URL)
+        self.say("已复制仓库地址：%s" % bridge.APP_URL)
 
     def detach_log(self):
         """Open the log in its own resizable window (handy on small screens)."""
@@ -421,6 +472,7 @@ class Console(Tk):
         def worker():
             from http.server import ThreadingHTTPServer
             try:
+                bridge.log(bridge.version_line())
                 bridge.reload_config(CONFIG_PATH)
                 host = bridge.CFG["listen"]["host"]
                 port = int(bridge.CFG["listen"]["port"])

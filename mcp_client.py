@@ -48,7 +48,7 @@ class McpServer:
         result = self.request("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": {"name": "persona-mcp-bridge", "version": "1.0"},
+            "clientInfo": {"name": "mcp-hands", "version": "1.0"},
         })
         self.info = (result or {}).get("serverInfo", {})
         self.notify("notifications/initialized", {})

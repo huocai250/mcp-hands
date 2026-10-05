@@ -1,7 +1,7 @@
 param(
     [string]$Ports = "8877,8890",
     [string]$Exe = "",
-    [string]$Display = "aiyu-mcp-bridge",
+    [string]$Display = "mcp-hands",
     [switch]$Remove
 )
 # Let the phone (same LAN) reach the bridge / proxy ports.

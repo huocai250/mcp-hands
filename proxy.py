@@ -175,7 +175,7 @@ def run_tool_loop(body, auth):
 
 class ProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "aiyu-app-proxy/1.0"
+    server_version = "mcp-hands/1.0"
 
     def log_message(self, fmt, *args):
         pass
@@ -352,7 +352,8 @@ class ProxyService:
 
 def main():
     bridge.log("=" * 62)
-    bridge.log("aiyu app-native tool proxy %s" % ("(packed exe)" if FROZEN else "(source)"))
+    bridge.log(bridge.version_line())
+    bridge.log("app-native tool proxy %s" % ("(packed exe)" if FROZEN else "(source)"))
     bridge.log("config : %s" % bridge.CONFIG_PATH)
     ProxyService().start()
     try:

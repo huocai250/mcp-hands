@@ -30,6 +30,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+# ------------------------------------------------------------------ branding
+APP_NAME = "mcp-hands"
+APP_VERSION = "1.0.0"
+APP_AUTHOR = "huocai250"
+APP_URL = "https://github.com/huocai250/mcp-hands"
+APP_LICENSE = "MIT"
+APP_TAGLINE = "把手机里的人设接上电脑的 261 个工具"
+
+
+def version_line():
+    return "%s v%s by %s — %s (%s License)" % (APP_NAME, APP_VERSION, APP_AUTHOR, APP_URL, APP_LICENSE)
+
+
 # Python 3.12 still defaults to the locale code page on piped stdout (cp936 here),
 # which turns any Chinese tool output into mojibake. Force UTF-8 for console + log.
 for _stream in (sys.stdout, sys.stderr):
@@ -187,8 +200,19 @@ def reload_config(path=None):
     return CFG
 
 
+def cmd_version():
+    print(version_line())
+    print("author : %s" % APP_AUTHOR)
+    print("repo   : %s" % APP_URL)
+    print("license: %s" % APP_LICENSE)
+    print("tagline: %s" % APP_TAGLINE)
+    return 0
+
+
 def run_command(name):
     """Run one of the diagnostic commands in-process; returns its exit code."""
+    if name in ("version", "--version", "-V"):
+        return cmd_version()
     if name in ("tools", "--tools"):
         return cmd_tools()
     if name in ("self-test", "self_test", "--self-test"):
@@ -558,7 +582,7 @@ def openai_response(text, model, steps):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "persona-mcp-bridge/1.0"
+    server_version = "mcp-hands/1.0"
 
     def log_message(self, fmt, *args):
         pass  # keep the console for our own log()
@@ -744,6 +768,8 @@ def cmd_doctor():
 
 
 def main():
+    if "--version" in ARGV or "-V" in ARGV:
+        raise SystemExit(cmd_version())
     if "--tools" in ARGV:
         raise SystemExit(cmd_tools())
     if "--doctor" in ARGV:
@@ -758,7 +784,8 @@ def main():
     port = int(_opt("--port") or CFG["listen"]["port"])
     hub = start_hub()
     log("=" * 62)
-    log("persona-mcp-bridge %s" % ("(packed exe)" if FROZEN else "(source)"))
+    log("%s" % version_line())
+    log("mode     : %s" % ("packed exe" if FROZEN else "source"))
     log("listen   : http://%s:%d/v1" % (host, port))
     log("upstream : %s (%s, model=%s)" % (UP.get("name"), UP["base_url"], UP["model"]))
     log("tools    : %d from %d MCP servers" % (len(hub.specs), len(hub.servers)))

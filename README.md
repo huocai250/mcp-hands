@@ -1,12 +1,14 @@
-# aiyu MCP Bridge
+# mcp-hands
 
-把**手机 App 里的人设**接上**电脑上的 261 个工具**（24 个自研 MCP server），并打包成带图形控制台的单个 exe。
+> **给她一双手**：把**手机 App 里的人设**接上**电脑上的 261 个工具**（24 个自研 MCP server），并打包成带图形控制台的单个 exe。
+
+作者 **huocai250** · 仓库 <https://github.com/huocai250/mcp-hands> · [MIT License](LICENSE) · Windows x64
 
 手机里那个角色不再只会聊天——它可以真的建 Word/Excel、读写文件、跑命令、开网页、截图、操作鼠标键盘、管计划任务、查注册表、发二维码、抓网页、备份目录，甚至开一个本地文件服务器让你从手机下载电脑上的文件。
 
 ```
 ┌──────────────┐  OpenAI 兼容   ┌───────────────────────────┐  纯文本对话   ┌───────────────────┐
-│ Cherry Studio│ ─────────────▶ │ aiyu-mcp-bridge.exe       │ ───────────▶ │ 手机 App 人设端点  │
+│ Cherry Studio│ ─────────────▶ │ mcp-hands.exe             │ ───────────▶ │ 手机 App 人设端点  │
 │ ChatBox 等   │ ◀───────────── │ 127.0.0.1:8877  (方式 A)  │ ◀─────────── │ PHONE:8866        │
 └──────────────┘  带 MCP 工具   └─────────────┬─────────────┘  不发送 tools └───────────────────┘
                                               │                ▲
@@ -30,13 +32,13 @@
 
 ### 1. 直接用打包好的 exe
 
-从 Releases 下载 `aiyu-mcp-bridge-<ver>.zip`，解压后双击 `aiyu-mcp-bridge.exe`：出现图形控制台 → 点「启动」。首次运行会在同目录生成 `bridge.config.json`。
+从 Releases 下载 `mcp-hands-v<ver>-windows-x64.zip`，解压后双击 `mcp-hands.exe`：出现图形控制台 → 点「启动」。首次运行会在同目录生成 `bridge.config.json`。
 
 ### 2. 源码运行
 
 ```bash
-git clone <repo-url>
-cd aiyu-mcp-bridge
+git clone https://github.com/huocai250/mcp-hands.git
+cd mcp-hands
 python -m pip install pypdf qrcode pillow python-docx openpyxl python-pptx
 python gui.py --autostart          # 图形控制台 + 自动启动服务
 # 或者：
@@ -44,7 +46,7 @@ python bridge.py                   # 只跑桥接服务（8877）
 python proxy.py                    # 只跑 App 直连代理（8890）
 ```
 
-`python bridge.py --tools | --self-test | --doctor | --init` 分别列出工具、跑自检、体检、生成默认配置。
+`python bridge.py --tools | --self-test | --doctor | --version | --init` 分别列出工具、跑自检、体检、查看版本作者信息、生成默认配置。
 
 ### 3. 自己打包 exe
 
@@ -53,7 +55,7 @@ powershell -ExecutionPolicy Bypass -File .\build-exe.ps1          # onedir（推
 powershell -ExecutionPolicy Bypass -File .\build-exe.ps1 -OneFile # 单文件
 ```
 
-产物在 `release\aiyu-mcp-bridge\`。
+产物在 `release\mcp-hands\`。
 
 ## 两种接入方式怎么选
 
@@ -199,4 +201,8 @@ scripts → 根目录      build-exe.ps1 / run-bridge.ps1 / stop-bridge.ps1 / st
 
 ## License
 
-MIT，见 [LICENSE](LICENSE)。
+MIT License，见 [LICENSE](LICENSE)。版权归 **huocai250** 所有；可自由使用、修改、分发与商用，保留版权声明即可。
+
+仓库：<https://github.com/huocai250/mcp-hands> · 版本与作者信息可用 `mcp-hands.exe --version` 或控制台「关于」查看。
+
+第三方组件（各自遵循其原协议）：PyInstaller（GPL with exception）、Pillow（MIT-CMU）、python-docx / openpyxl / python-pptx（MIT）、pypdf（BSD）、qrcode（BSD）、lxml（BSD）、Tcl/Tk（BSD-like）。

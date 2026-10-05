@@ -1,11 +1,10 @@
 @echo off
 cd /d "%~dp0"
-set EXE=%~dp0release\aiyu-mcp-bridge\aiyu-mcp-bridge.exe
-if not exist "%EXE%" set EXE=%~dp0release\aiyu-mcp-bridge.exe
-if not exist "%EXE%" set EXE=%~dp0dist\aiyu-mcp-bridge\aiyu-mcp-bridge.exe
-if not exist "%EXE%" set EXE=%~dp0dist\aiyu-mcp-bridge.exe
+echo mcp-hands - https://github.com/huocai250/mcp-hands - MIT License
+set EXE=%~dp0release\mcp-hands\mcp-hands.exe
+if not exist "%EXE%" set EXE=%~dp0release\mcp-hands.exe
 if not exist "%EXE%" (
-  echo aiyu-mcp-bridge.exe not found. Run build-exe.ps1 first.
+  echo mcp-hands.exe not found. Run build-exe.ps1 first.
   pause
   exit /b 1
 )

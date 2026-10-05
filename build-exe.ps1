@@ -2,7 +2,8 @@ param(
     [switch]$OneFile,
     [string]$Venv = ".build-venv"
 )
-# Rebuild aiyu-mcp-bridge.exe. Creates the build venv on first run.
+# Rebuild mcp-hands.exe. Creates the build venv on first run.
+# mcp-hands — https://github.com/huocai250/mcp-hands — MIT License
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $here
@@ -16,7 +17,7 @@ if (-not (Test-Path $py)) {
 }
 
 $common = @(
-    "--noconfirm", "--clean", "--console", "--name", "aiyu-mcp-bridge",
+    "--noconfirm", "--clean", "--console", "--name", "mcp-hands",
     "--paths", ".", "--paths", "servers",
     "--hidden-import", "mcpserver",
     "--hidden-import", "tkinter",
@@ -32,7 +33,7 @@ $mode = if ($OneFile) { "--onefile" } else { "--onedir" }
 Write-Host "building ($mode) ..."
 & $py -m PyInstaller @common $mode gui.py
 
-$target = if ($OneFile) { "release\aiyu-mcp-bridge.exe" } else { "release\aiyu-mcp-bridge\aiyu-mcp-bridge.exe" }
+$target = if ($OneFile) { "release\mcp-hands.exe" } else { "release\mcp-hands\mcp-hands.exe" }
 if (Test-Path $target) {
     Write-Host ""
     Write-Host "built: $target"
