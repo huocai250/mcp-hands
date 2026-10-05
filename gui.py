@@ -75,7 +75,8 @@ def hide_console():
 
 
 CLI_FLAGS = ("--tools", "--self-test", "--doctor", "--version", "--init", "--jobs",
-             "--jobs-run", "--migrate", "--audit", "--plans")
+             "--jobs-run", "--migrate", "--audit", "--plans", "--devices", "--outbox",
+             "--backup", "--restore", "--check-update")
 
 
 def main():
@@ -212,6 +213,8 @@ class Console(Tk):
                           ("测试对话", self.test_chat),
                           ("测试视觉", self.test_vision),
                           ("后台任务", self.show_jobs),
+                          ("设备", lambda: self.run_cmd("devices")),
+                          ("媒体出口", lambda: self.run_cmd("outbox")),
                           ("网页控制台", self.open_dashboard),
                           ("关于", self.show_about)):
             ttk.Button(bar, text=text, command=cmd).pack(side=LEFT, padx=(0, 6))

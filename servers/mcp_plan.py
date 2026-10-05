@@ -46,10 +46,13 @@ def _fmt(plan):
     for index, step in enumerate(plan.get("steps") or [], 1):
         mark = {"todo": "[ ]", "doing": "[~]", "done": "[x]", "failed": "[!]", "skipped": "[-]"}.get(
             step.get("status"), "[ ]")
-        lines.append("%s %d. %s%s" % (mark, index, step.get("text", ""),
-                                      (" (tool=%s)" % step["tool"]) if step.get("tool") else ""))
+        lines.append("%s %d. %s%s%s" % (mark, index, step.get("text", ""),
+                                        (" (tool=%s)" % step["tool"]) if step.get("tool") else "",
+                                        (" [需要验证]" if step.get("verify") else "")))
         if step.get("evidence"):
             lines.append("      evidence: %s" % step["evidence"][:200].replace("\n", " "))
+        if step.get("verify_evidence"):
+            lines.append("      verified: %s" % step["verify_evidence"][:200].replace("\n", " "))
     return "\n".join(lines)
 
 
@@ -98,20 +101,33 @@ def plan_next(id):
 
 
 @srv.tool("plan_done",
-          "Mark a plan step finished - pass the real tool output as evidence (no evidence, not done).",
+          "Mark a plan step finished - pass the real tool output as evidence (no evidence, not done). "
+          "If the step demanded verification, also pass verify_evidence from a fresh check.",
           {"type": "object", "properties": {"id": {"type": "string"},
                                             "step": {"type": "string", "description": "1-based index or part of the text"},
                                             "evidence": {"type": "string", "default": ""},
+                                            "verify_evidence": {"type": "string", "default": "",
+                                                                "description": "output of the independent check"},
                                             "status": {"type": "string", "default": "done",
                                                        "description": "done | failed | skipped | doing"},
                                             "error": {"type": "string", "default": ""}},
            "required": ["id", "step"]})
-def plan_done(id, step, evidence="", status="done", error=""):
-    payload = {"step": step, "evidence": evidence, "status": status, "error": error}
+def plan_done(id, step, evidence="", status="done", error="", verify_evidence=""):
+    payload = {"step": step, "evidence": evidence, "status": status, "error": error,
+               "verify_evidence": verify_evidence}
     data, error_text = _call("/v2/plans/%s/step" % urllib.parse.quote(str(id)), payload, method="POST")
     if error_text:
         return "could not update the step: %s" % error_text
     return _fmt(data.get("plan"))
+
+
+@srv.tool("plan_journal", "A readable log of a plan:每一步做到哪、证据是什么、验证过了没。",
+          {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]})
+def plan_journal(id):
+    data, error = _call("/v2/plans/%s/journal" % urllib.parse.quote(str(id)))
+    if error:
+        return "could not read the plan journal: %s" % error
+    return data.get("journal") or "(empty)"
 
 
 @srv.tool("plan_add_step", "Append a step discovered while working (plans are allowed to grow).",

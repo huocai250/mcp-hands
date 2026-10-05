@@ -33,11 +33,12 @@ sys.path.insert(0, HERE)
 
 # ------------------------------------------------------------------ branding
 APP_NAME = "mcp-hands"
-APP_VERSION = "3.0.1"
+APP_VERSION = "4.0.0"
 APP_AUTHOR = "huocai250"
 APP_URL = "https://github.com/huocai250/mcp-hands"
+APP_REPO = "huocai250/mcp-hands"
 APP_LICENSE = "MIT"
-APP_TAGLINE = "把手机里的人设接上电脑的 363 个工具：能看能读、能干长活、能被审计"
+APP_TAGLINE = "把手机里的人设接上电脑的 376 个工具：有嘴有身份、能干长活、能被审计"
 
 
 def version_line():
@@ -64,8 +65,10 @@ if "--mcp-server" in ARGV:
     raise SystemExit(0)
 
 from audit import AuditStore, Policy  # noqa: E402
+from devices import DeviceStore, mask_key  # noqa: E402
 from jobs import JobRunner, JobStore  # noqa: E402
 from mcp_client import ToolHub  # noqa: E402
+from outbox import Outbox  # noqa: E402
 from plans import PlanStore  # noqa: E402
 
 
@@ -104,6 +107,8 @@ DASHBOARD_HTML = """<!doctype html>
 <span class="dim">bridge __BRIDGE__</span></header>
 <main>
  <section><h2>概览</h2><div id="overview"></div></section>
+ <section><h2>设备与配对</h2><div id="devices"></div></section>
+ <section><h2>媒体出口（未打开的项目）</h2><div id="outbox"></div></section>
  <section><h2>后台任务</h2><div id="jobs"></div></section>
  <section><h2>计划</h2><div id="plans"></div></section>
  <section><h2>最近工具调用（审计）</h2><div id="audit"></div></section>
@@ -131,7 +136,19 @@ async function tick(){
   const audit=await j("/v2/audit?limit=12");
   document.getElementById("audit").innerHTML="<table><tr><th>时间</th><th>工具</th><th>结果</th><th>参数</th></tr>"+
     (audit.calls||[]).map(c=>`<tr><td class="dim">${esc((c.when||"").slice(11))}</td><td>${esc(c.tool)}</td><td class="${c.ok?'ok':'bad'}">${c.ok?'ok':'失败 '+(c.ms||0)+'ms'}</td><td><pre>${esc(JSON.stringify(c.args)).slice(0,120)}</pre></td></tr>`).join("")+"</table>";
+  const dev=await j("/v2/devices?stats=1");
+  let dh="<table><tr><th>状态</th><th>id</th><th>名称/密钥</th><th>最近</th><th>调用</th><th>操作</th></tr>";
+  dh+=(dev.devices||[]).map(d=>`<tr><td class="ok">已批准</td><td>${esc(d.id)}</td><td>${esc(d.name)} <span class="dim">${esc(d.masked||'')}</span></td><td class="dim">${d.last_seen?new Date(d.last_seen*1000).toLocaleTimeString():'-'}</td><td>${d.calls||0}</td><td><button onclick="act('revoke','${d.id}')">撤销</button></td></tr>`).join("");
+  dh+=(dev.pending||[]).map(p=>`<tr><td class="bad">待批准</td><td>${esc(p.id)}</td><td>${esc(p.masked||'')} <span class="dim">${esc(p.ip||'')}</span></td><td class="dim">${p.seen||1} 次尝试</td><td>-</td><td><button onclick="act('approve','${p.id}')">批准</button> <button onclick="act('reject','${p.id}')">拒绝</button></td></tr>`).join("");
+  document.getElementById("devices").innerHTML=dh+"</table><div class=\"dim\">mode="+esc(dev.mode)+"（off=不校验，allowlist=只允许已批准设备）</div>";
+  const box=await j("/v2/outbox?limit=8");
+  document.getElementById("outbox").innerHTML="<table><tr><th>id</th><th>类型</th><th>名称</th><th>大小</th><th>取用</th><th>链接</th></tr>"+
+    (box.items||[]).map(o=>`<tr><td>${esc(o.id)}</td><td>${esc(o.kind)}</td><td>${esc(o.name)}</td><td>${o.bytes}</td><td>${o.fetches||0}</td><td><a href="${esc(o.url)}" target="_blank">打开</a></td></tr>`).join("")+"</table>";
  }catch(e){document.getElementById("status").textContent="离线（bridge 未运行？）";}
+}
+async function act(action,id){
+  await fetch(API+"/v2/devices/"+action,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:id})});
+  tick();
 }
 tick();setInterval(tick,3000);
 </script></body></html>"""
@@ -162,6 +179,8 @@ DEFAULT_CONFIG = {
     },
     "jobs": {"enabled": True, "workers": 1, "notify": True, "db": ""},
     "memory": {"auto_index": True},
+    "outbox": {"dir": "", "ttl": 3600, "max_items": 200, "secret": ""},
+    "devices": {"mode": "off", "path": "", "salt": ""},
     "plans": {"db": ""},
     "audit": {"enabled": True, "db": "", "max_rows": 20000},
     "policy": {"mode": "audit", "deny": [], "allow": [], "deny_paths": [],
@@ -204,6 +223,8 @@ DEFAULT_CONFIG = {
         {"name": "memory", "enabled": True},
         {"name": "plan", "enabled": True},
         {"name": "audit", "enabled": True},
+        {"name": "send", "enabled": True},
+        {"name": "device", "enabled": True},
     ],
 }
 
@@ -313,6 +334,10 @@ def load_config():
     log_cfg.setdefault("format", "text")
     log_cfg.setdefault("max_mb", 8)
     cfg.setdefault("profiles", {})
+    cfg.setdefault("outbox", {})
+    cfg["outbox"].setdefault("ttl", 3600)
+    cfg["outbox"].setdefault("max_items", 200)
+    cfg.setdefault("devices", {}).setdefault("mode", "off")
     return cfg
 
 
@@ -351,8 +376,11 @@ MIGRATIONS = {
     "policy.max_calls_per_minute": 0,
     "log.format": "text",
     "log.max_mb": 8,
+    "outbox.ttl": 3600,
+    "outbox.max_items": 200,
+    "devices.mode": "off",
 }
-NEW_SERVERS = ("jobs", "memory", "plan", "audit")
+NEW_SERVERS = ("jobs", "memory", "plan", "audit", "send", "device")
 
 
 def migrate_config(path=None):
@@ -392,6 +420,8 @@ _RUNNER = None
 _AUDIT = None
 _POLICY = None
 _PLANS = None
+_OUTBOX = None
+_DEVICES = None
 
 
 def audit_store():
@@ -418,6 +448,35 @@ def plan_store():
         cfg = CFG.get("plans") or {}
         _PLANS = PlanStore(cfg.get("db") or os.path.join(BASE_DIR, "plans.db"))
     return _PLANS
+
+
+def outbox():
+    """4.0: signed, expiring links so the persona can actually hand things to the phone."""
+    global _OUTBOX
+    if _OUTBOX is None:
+        cfg = CFG.get("outbox") or {}
+        root = cfg.get("dir") or os.path.join(BASE_DIR, "outbox")
+        _OUTBOX = Outbox(root, secret=cfg.get("secret") or "mcp-hands-%s" % os.path.basename(BASE_DIR),
+                         default_ttl=cfg.get("ttl") or 3600,
+                         max_items=cfg.get("max_items") or 200)
+        removed = _OUTBOX.purge()
+        if removed:
+            log("outbox: cleaned %d expired item(s)" % removed)
+    return _OUTBOX
+
+
+def device_store():
+    """4.0: which devices may drive this PC (mode=off keeps the old open behaviour)."""
+    global _DEVICES
+    if _DEVICES is None:
+        cfg = CFG.get("devices") or {}
+        _DEVICES = DeviceStore(cfg.get("path") or os.path.join(BASE_DIR, "devices.json"),
+                               salt=cfg.get("salt") or "")
+    return _DEVICES
+
+
+def devices_mode():
+    return str((CFG.get("devices") or {}).get("mode") or "off").lower()
 
 
 def _guard_tool(name, args):
@@ -604,6 +663,20 @@ def run_command(name):
         return cmd_audit(int(_opt("--limit") or 30))
     if name in ("plans", "--plans"):
         return cmd_plans(int(_opt("--limit") or 20))
+    if name in ("devices", "--devices"):
+        return cmd_devices(int(_opt("--limit") or 30))
+    if name in ("devices-approve", "--devices-approve"):
+        return cmd_devices_approve(_opt("--devices-approve") or "", _opt("--name") or "")
+    if name in ("devices-revoke", "--devices-revoke"):
+        return cmd_devices_revoke(_opt("--devices-revoke") or "")
+    if name in ("outbox", "--outbox"):
+        return cmd_outbox(bool(_opt("--purge")), int(_opt("--limit") or 20))
+    if name in ("backup", "--backup"):
+        return cmd_backup(_opt("--backup") or "")
+    if name in ("restore", "--restore"):
+        return cmd_restore(_opt("--restore") or "")
+    if name in ("check-update", "--check-update"):
+        return cmd_check_update()
     return 2
 
 # ------------------------------------------------------------- tool protocol
@@ -1058,6 +1131,100 @@ def openai_response(text, model, steps):
     }
 
 
+def lan_ips():
+    """Plausible LAN IPv4 addresses, best first (private ranges beat virtual adapters)."""
+    import socket
+
+    def score(ip):
+        if ip.startswith("192.168."):
+            return 0
+        if ip.startswith("10."):
+            return 1
+        if re.match(r"172\.(1[6-9]|2\d|3[01])\.", ip):
+            return 2
+        if ip.startswith("127.") or ip.startswith("169.254."):
+            return 9
+        if ip.startswith("198.18.") or ip.startswith("198.19."):   # benchmarking range: virtual
+            return 8
+        return 5
+
+    found = []
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(("8.8.8.8", 80))
+        found.append(probe.getsockname()[0])
+        probe.close()
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            found.append(info[4][0])
+    except OSError:
+        pass
+    seen, ordered = set(), []
+    for ip in sorted(found, key=score):
+        if ip and ip not in seen:
+            seen.add(ip)
+            ordered.append(ip)
+    return ordered or ["127.0.0.1"]
+
+
+def lan_ip():
+    """Best-effort LAN address of this machine (used for phone-reachable URLs)."""
+    return lan_ips()[0]
+
+
+_LAST_HOST = {"host": "", "at": 0.0}
+
+
+def note_client_host(host):
+    """Remember which host:port a client reached us on - the most reliable base URL."""
+    text = str(host or "").strip()
+    if not text or text.startswith("127.0.0.1") or text.startswith("localhost"):
+        return
+    _LAST_HOST["host"] = text
+    _LAST_HOST["at"] = time.time()
+
+
+def client_host(fresh_seconds=300):
+    if not _LAST_HOST["host"]:
+        return ""
+    if time.time() - _LAST_HOST["at"] > float(fresh_seconds):
+        return ""
+    return _LAST_HOST["host"]
+
+
+def serve_outbox(handler, token):
+    """Serve one signed outbox item; shared by the bridge and the proxy handlers."""
+    record, target = outbox().resolve(urllib.parse.unquote(token or ""))
+    if not record:
+        handler._json({"error": {"message": "outbox item unavailable: %s" % target}}, 404)
+        return
+    types = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+             ".webp": "image/webp", ".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
+             ".ogg": "audio/ogg", ".mp4": "video/mp4", ".webm": "video/webm", ".mkv": "video/x-matroska",
+             ".txt": "text/plain; charset=utf-8", ".md": "text/markdown; charset=utf-8",
+             ".zip": "application/zip", ".7z": "application/x-7z-compressed",
+             ".pdf": "application/pdf", ".json": "application/json"}
+    try:
+        with open(target, "rb") as fh:
+            blob = fh.read()
+    except OSError as exc:
+        handler._json({"error": {"message": "outbox read failed: %s" % exc}}, 500)
+        return
+    ext = os.path.splitext(target)[1].lower()
+    served = outbox().touch(record["id"]) or record
+    log("outbox delivered %s (%s, %d bytes) - fetch #%s" % (record["id"], record.get("name"),
+                                                            len(blob), served.get("fetches")))
+    handler.send_response(200)
+    handler.send_header("Content-Type", types.get(ext, "application/octet-stream"))
+    handler.send_header("Content-Length", str(len(blob)))
+    handler.send_header("Content-Disposition", 'inline; filename="%s"' % os.path.basename(target))
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    handler.wfile.write(blob)
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "mcp-hands/1.0"
@@ -1084,6 +1251,10 @@ class Handler(BaseHTTPRequestHandler):
     def _sse_chunk(self, text):
         data = text.encode("utf-8")
         self.wfile.write(("%X\r\n" % len(data)).encode("ascii") + data + b"\r\n")
+
+    def _serve_outbox(self, token):
+        """Serve one signed, expiring outbox item (this is how the phone gets media)."""
+        serve_outbox(self, token)
 
     def _dashboard(self):
         """A single self-contained page: servers, jobs, plans, audit, metrics (3.0)."""
@@ -1118,11 +1289,35 @@ class Handler(BaseHTTPRequestHandler):
                         "jobs": store.stats(), "plans": plan_store().stats(),
                         "audit": audit_store().stats(), "metrics": METRICS,
                         "policy": policy().describe(),
+                        "outbox": outbox().stats(),
+                        "devices": dict(device_store().stats(), mode=devices_mode()),
                         "profiles": profile_names(),
                         "servers": len(HUB.specs) if HUB else 0})
             return
         if route == "profiles":
             self._json({"profiles": [{"name": name, "config": profile_config(name)} for name in profile_names()]})
+            return
+        if route == "devices":
+            store = device_store()
+            pending_only = str(query.get("pending", ["0"])[0]) in ("1", "true", "yes")
+            payload = {"mode": devices_mode(), "stats": store.stats()}
+            if pending_only:
+                payload["pending"] = store.pending()
+            else:
+                payload["devices"] = store.devices()
+                if str(query.get("stats", ["0"])[0]) in ("1", "true", "yes"):
+                    payload["pending"] = store.pending()
+            self._json(payload)
+            return
+        if route == "outbox":
+            items = outbox().list(limit=int(query.get("limit", ["20"])[0]))
+            base = self._outbox_base()
+            for item in items:
+                item["url"] = "%s/out/%s" % (base, item["token"])
+            self._json({"items": items, "stats": outbox().stats(), "base": base})
+            return
+        if route == "profile_policy":
+            self._json({"policy": policy().describe()})
             return
         if route == "policy":
             self._json({"policy": policy().describe()})
@@ -1147,7 +1342,17 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"stats": plan_store().stats()})
             return
         if route.startswith("plans/"):
-            plan = plan_store().get(route.split("/", 1)[1])
+            parts = [p for p in route.split("/") if p]
+            plan_id = parts[1] if len(parts) > 1 else ""
+            tail = parts[2] if len(parts) > 2 else ""
+            if tail == "journal":
+                journal = plan_store().journal(plan_id)
+                if journal is None:
+                    self._json({"error": {"message": "no such plan"}}, 404)
+                    return
+                self._json({"journal": journal, "plan": plan_store().get(plan_id)})
+                return
+            plan = plan_store().get(plan_id)
             if not plan:
                 self._json({"error": {"message": "no such plan"}}, 404)
                 return
@@ -1178,10 +1383,91 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json({"error": {"message": "not found"}}, 404)
 
+    def _archive_plan(self, plan):
+        """A finished plan leaves a journal in long-term memory (4.0)."""
+        if (CFG.get("memory") or {}).get("auto_index", True) is False:
+            return
+        journal = plan_store().journal(plan.get("id"))
+        if not journal:
+            return
+        try:
+            start_hub().call("memory_memory_add", {"text": journal[:4000], "tags": "计划日志",
+                                                   "source": "plan:%s" % plan.get("id")})
+            log("plan %s finished -> journal stored in memory (%d chars)" % (plan.get("id"), len(journal)))
+        except Exception as exc:  # noqa: BLE001
+            log("could not archive the plan journal: %s" % exc)
+
+    def _outbox_base(self):
+        """A phone-reachable base for outbox links.
+
+        The proxy is the phone-facing port (usually bound to 0.0.0.0), while the bridge
+        itself may be loopback-only - so outbox links must point at the proxy when it is
+        enabled, otherwise the phone would get a 127.0.0.1 URL it cannot open.
+        """
+        proxy = CFG.get("proxy") or {}
+        override = str((CFG.get("outbox") or {}).get("base_url") or "").rstrip("/")
+        if override:
+            return override
+        # Best signal: the host the client actually used to reach us (e.g. the phone
+        # calling 172.26.70.161:8890). Falls back to guessing the LAN address.
+        seen = client_host()
+        if seen:
+            return "http://%s" % seen
+        if proxy.get("enabled", True) is not False:
+            port = (proxy.get("listen") or {}).get("port", 8890)
+            return "http://%s:%s" % (lan_ip(), port)
+        listen = CFG.get("listen") or {}
+        host = listen.get("host", "127.0.0.1")
+        port = listen.get("port", 8877)
+        return "http://%s:%s" % (lan_ip() if host in ("0.0.0.0", "::", "127.0.0.1") else host, port)
+
     def _v2_post(self):
         parsed = urllib.parse.urlsplit(self.path)
         route = parsed.path[len("/v2/"):].strip("/")
         body = self._read_body()
+        if route == "outbox":
+            path = body.get("path")
+            if not path:
+                self._json({"error": {"message": "give me a path (and optionally kind/ttl/once/note)"}}, 400)
+                return
+            try:
+                record = outbox().add(path, kind=body.get("kind") or "file",
+                                      ttl=body.get("ttl"), once=body.get("once", False),
+                                      note=body.get("note", ""))
+            except FileNotFoundError:
+                self._json({"error": {"message": "file not found: %s" % path}}, 404)
+                return
+            record = dict(record, url="%s/out/%s" % (self._outbox_base(), record["token"]))
+            log("outbox added %s (%s, %d bytes)" % (record["id"], record.get("name"), record["bytes"]))
+            self._json({"item": record}, 201)
+            return
+        if route == "outbox/purge":
+            self._json({"removed": outbox().purge()})
+            return
+        if route.startswith("devices/"):
+            action = route.split("/", 1)[1]
+            store = device_store()
+            if action == "approve":
+                device = store.approve(body.get("id", ""), body.get("name", ""))
+                if not device:
+                    self._json({"error": {"message": "no such pending device"}}, 404)
+                    return
+                log("device approved: %s (%s)" % (device["id"], device["name"]))
+                self._json({"device": device})
+                return
+            if action == "reject":
+                self._json({"rejected": store.reject(body.get("id", ""))})
+                return
+            if action == "revoke":
+                self._json({"revoked": store.revoke(body.get("id", ""))})
+                return
+            if action == "rename":
+                device = store.rename(body.get("id", ""), body.get("name", ""))
+                self._json({"device": device} if device else {"error": {"message": "no such device"}},
+                           200 if device else 404)
+                return
+            self._json({"error": {"message": "unknown device action"}}, 404)
+            return
         if route == "plans":
             try:
                 plan = plan_store().create(goal=body.get("goal", ""), steps=body.get("steps"),
@@ -1201,8 +1487,15 @@ class Handler(BaseHTTPRequestHandler):
                 plan = plan_store().add_step(plan_id, body.get("text", ""), body.get("tool", ""),
                                              args=body.get("args"))
             elif action == "step":
-                plan = plan_store().mark_step(plan_id, body.get("step", ""), body.get("status", "done"),
-                                              evidence=body.get("evidence", ""), error=body.get("error", ""))
+                try:
+                    plan = plan_store().mark_step(plan_id, body.get("step", ""), body.get("status", "done"),
+                                                  evidence=body.get("evidence", ""), error=body.get("error", ""),
+                                                  verify_evidence=body.get("verify_evidence", ""))
+                except ValueError as exc:
+                    self._json({"error": {"message": str(exc), "type": "verification_required"}}, 400)
+                    return
+                if plan and plan.get("status") == "done":
+                    self._archive_plan(plan)
             elif action == "add":
                 plan = plan_store().add_step(plan_id, body.get("text", ""), body.get("tool", ""),
                                              args=body.get("args"))
@@ -1243,6 +1536,9 @@ class Handler(BaseHTTPRequestHandler):
 
     # -------------------------------------------------------------------- routes
     def do_GET(self):
+        if self.path.startswith("/out/"):
+            self._serve_outbox(self.path[len("/out/"):].split("?")[0])
+            return
         if self.path.startswith("/dashboard"):
             self._dashboard()
             return
@@ -1473,6 +1769,148 @@ def cmd_plans(limit=20):
     return 0
 
 
+def cmd_devices(limit=30):
+    """--devices: who may drive this PC, plus any approval waiting."""
+    store = device_store()
+    stats = store.stats()
+    print("devices: mode=%s registered=%d pending=%d calls=%d file=%s"
+          % (devices_mode(), stats["devices"], stats["pending"], stats["calls"], store.path))
+    for device in store.devices()[:int(limit)]:
+        print("  %s %s [%s] last_seen=%s calls=%s" % (
+            device["id"], device.get("name"), device.get("masked"),
+            time.strftime("%Y-%m-%d %H:%M", time.localtime(device.get("last_seen") or 0)) if device.get("last_seen") else "-",
+            device.get("calls")))
+    for item in store.pending():
+        print("  PENDING %s key=%s tries=%s ip=%s (approve with --devices-approve %s)"
+              % (item["id"], item.get("masked"), item.get("seen"), item.get("ip"), item["id"]))
+    if devices_mode() == "off":
+        print("  note=devices.mode is 'off': any client that can reach the port may use this PC. "
+              "Set it to 'allowlist' to require approval.")
+    return 0
+
+
+def cmd_devices_approve(pending_id, name=""):
+    device = device_store().approve(pending_id, name)
+    if not device:
+        print("no pending device with id %s" % pending_id)
+        return 1
+    print("approved %s as %r" % (device["id"], device["name"]))
+    return 0
+
+
+def cmd_devices_revoke(device_id):
+    ok = device_store().revoke(device_id)
+    print("revoked %s" % device_id if ok else "no device with id %s" % device_id)
+    return 0 if ok else 1
+
+
+def cmd_outbox(purge=False, limit=20):
+    box = outbox()
+    if purge:
+        print("purged %d expired item(s)" % box.purge())
+    stats = box.stats()
+    print("outbox: items=%d bytes=%d kinds=%s dir=%s" % (stats["items"], stats["bytes"],
+                                                         stats["kinds"] or "-", box.root))
+    for item in box.list(limit=int(limit)):
+        print("  %s [%s] %s bytes=%s fetches=%s expires_in=%ss"
+              % (item["id"], item.get("kind"), item.get("name"), item.get("bytes"), item.get("fetches"),
+                 int(float(item.get("expires") or 0) - time.time())))
+    return 0
+
+
+def cmd_backup(target=""):
+    """--backup [zip]: one archive with every piece of state (config, jobs, plans, memory, audit, devices)."""
+    import zipfile
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    target = target or os.path.join(BASE_DIR, "mcp-hands-backup-%s.zip" % stamp)
+    files = []
+    for name in ("bridge.config.json", "jobs.db", "plans.db", "audit.db", "devices.json"):
+        path = os.path.join(BASE_DIR, name)
+        if os.path.isfile(path):
+            files.append(path)
+    memory_db = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+                             "mcp-hands", "memory.db")
+    if os.path.isfile(memory_db):
+        files.append(memory_db)
+    outbox_dir = os.path.join(BASE_DIR, "outbox")
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in files:
+            zf.write(path, os.path.basename(path))
+        if os.path.isdir(outbox_dir):
+            for root, _dirs, names in os.walk(outbox_dir):
+                for name in names:
+                    full = os.path.join(root, name)
+                    zf.write(full, os.path.relpath(full, BASE_DIR))
+        zf.writestr("backup.json", json.dumps({"version": APP_VERSION, "created": time.time(),
+                                               "files": [os.path.basename(p) for p in files]},
+                                              ensure_ascii=False, indent=2))
+    print("backup written: %s (%d file(s), %.1f KB)" % (target, len(files), os.path.getsize(target) / 1024.0))
+    return 0
+
+
+def cmd_restore(source):
+    """--restore <zip>: put state back (existing files are kept as .before-restore)."""
+    import zipfile
+    if not os.path.isfile(source):
+        print("no such backup: %s" % source)
+        return 1
+    restored = []
+    with zipfile.ZipFile(source) as zf:
+        for info in zf.infolist():
+            name = os.path.basename(info.filename)
+            if not name or name == "backup.json":
+                continue
+            if name not in ("bridge.config.json", "jobs.db", "plans.db", "audit.db",
+                            "devices.json", "memory.db") and not info.filename.startswith("outbox/"):
+                continue
+            if info.filename.startswith("outbox/"):
+                target = os.path.join(BASE_DIR, info.filename)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+            elif name == "memory.db":
+                target = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+                                      "mcp-hands", name)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+            else:
+                target = os.path.join(BASE_DIR, name)
+            if os.path.isfile(target):
+                try:
+                    os.replace(target, target + ".before-restore")
+                except OSError:
+                    pass
+            with zf.open(info) as src, open(target, "wb") as dst:
+                dst.write(src.read())
+            restored.append(name)
+    print("restored %d file(s): %s" % (len(restored), ", ".join(sorted(set(restored)))))
+    print("note=restart the service so the restored config and databases are picked up")
+    return 0
+
+
+def cmd_check_update():
+    """--check-update: compare this build with the newest published release."""
+    import urllib.error
+    url = "https://api.github.com/repos/%s/releases/latest" % APP_REPO
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": APP_NAME, "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            data = json.loads(response.read().decode("utf-8", "replace"))
+    except Exception as exc:  # noqa: BLE001
+        print("could not check for updates: %s" % exc)
+        return 1
+    latest = str(data.get("tag_name") or "").lstrip("v")
+    assets = [a.get("browser_download_url") for a in (data.get("assets") or [])]
+    print("installed : %s" % APP_VERSION)
+    print("published : %s (%s)" % (latest or "?", data.get("published_at")))
+    if latest and latest != APP_VERSION:
+        print("update available: %s" % data.get("html_url"))
+        for asset in assets:
+            if asset:
+                print("  asset: %s" % asset)
+        print("run update.ps1 (or download the asset and replace mcp-hands.exe + _internal)")
+    else:
+        print("you are on the latest version")
+    return 0
+
+
 def main():
     if "--version" in ARGV or "-V" in ARGV:
         raise SystemExit(cmd_version())
@@ -1493,6 +1931,20 @@ def main():
         raise SystemExit(cmd_audit(int(_opt("--limit") or 30)))
     if "--plans" in ARGV:
         raise SystemExit(cmd_plans(int(_opt("--limit") or 20)))
+    if "--devices" in ARGV:
+        raise SystemExit(cmd_devices(int(_opt("--limit") or 30)))
+    if "--devices-approve" in ARGV:
+        raise SystemExit(cmd_devices_approve(_opt("--devices-approve") or "", _opt("--name") or ""))
+    if "--devices-revoke" in ARGV:
+        raise SystemExit(cmd_devices_revoke(_opt("--devices-revoke") or ""))
+    if "--outbox" in ARGV:
+        raise SystemExit(cmd_outbox(bool(_opt("--purge")), int(_opt("--limit") or 20)))
+    if "--backup" in ARGV:
+        raise SystemExit(cmd_backup(_opt("--backup") or ""))
+    if "--restore" in ARGV:
+        raise SystemExit(cmd_restore(_opt("--restore") or ""))
+    if "--check-update" in ARGV:
+        raise SystemExit(cmd_check_update())
     if "--init" in ARGV:
         print("config written: %s" % write_default_config(_opt("--config")))
         raise SystemExit(0)

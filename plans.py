@@ -77,6 +77,9 @@ class PlanStore:
                 "args": item.get("args") if isinstance(item.get("args"), dict) else {},
                 "status": item.get("status") if item.get("status") in STEP_STATUSES else "todo",
                 "evidence": str(item.get("evidence") or ""),
+                # 4.0: a step may demand independent proof before it counts as done.
+                "verify": str(item.get("verify") or ""),
+                "verify_evidence": str(item.get("verify_evidence") or ""),
                 "updated": time.time(),
             })
         return out
@@ -112,7 +115,7 @@ class PlanStore:
         steps = plan["steps"] + self._clean_steps([{"text": text, "tool": tool, "args": args or {}}])
         return self._save(plan_id, steps)
 
-    def mark_step(self, plan_id, index_or_text, status, evidence="", error=""):
+    def mark_step(self, plan_id, index_or_text, status, evidence="", error="", verify_evidence=""):
         plan = self.get(plan_id)
         if not plan:
             return None
@@ -129,9 +132,15 @@ class PlanStore:
             return None
         if status not in STEP_STATUSES:
             return None
+        if status == "done" and target.get("verify") and not str(verify_evidence).strip():
+            raise ValueError(
+                "step %r asks for independent proof: run the check and pass verify_evidence "
+                "(requirement: %s)" % (target.get("text", "")[:40], target.get("verify")))
         target["status"] = status
         if evidence:
             target["evidence"] = str(evidence)[:2000]
+        if verify_evidence:
+            target["verify_evidence"] = str(verify_evidence)[:2000]
         if error:
             target["evidence"] = ("FAILED: %s" % error)[:2000]
         target["updated"] = time.time()
@@ -140,6 +149,28 @@ class PlanStore:
         if plan and all(s["status"] in ("done", "failed", "skipped") for s in plan["steps"]):
             plan = self.update(plan_id, status="done")
         return plan
+
+    def journal(self, plan_id):
+        """A human-readable log of what happened, step by step."""
+        plan = self.get(plan_id)
+        if not plan:
+            return None
+        lines = ["# 计划日志：%s" % (plan["title"] or plan["goal"][:50]),
+                 "", "目标：%s" % plan["goal"],
+                 "状态：%s（%d/%d 完成）" % (plan["status"], plan["done"], plan["total"]),
+                 "创建：%s" % time.strftime("%Y-%m-%d %H:%M", time.localtime(plan["created"] or 0)),
+                 ""]
+        for index, step in enumerate(plan["steps"], 1):
+            lines.append("%d. [%s] %s" % (index, step.get("status"), step.get("text")))
+            if step.get("tool"):
+                lines.append("   工具：%s %s" % (step["tool"], json.dumps(step.get("args") or {}, ensure_ascii=False)))
+            if step.get("verify"):
+                lines.append("   验证要求：%s" % step["verify"])
+            if step.get("evidence"):
+                lines.append("   证据：%s" % step["evidence"].replace("\n", " ")[:300])
+            if step.get("verify_evidence"):
+                lines.append("   验证：%s" % step["verify_evidence"].replace("\n", " ")[:300])
+        return "\n".join(lines)
 
     def update(self, plan_id, **fields):
         if not fields:

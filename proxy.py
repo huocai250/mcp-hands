@@ -118,7 +118,11 @@ TOOL_HINT = """你在操作一台真实的 Windows 电脑，下面这些工具�
 
 【7 主动开口】你不能主动在手机 App 里发消息（App 没有推送通道），也绝不许谎称你发过。要主动找用户就走电脑通道：立刻提醒用 sys_toast 或 voice_toast_speak（后者会念出来）；定时提醒用 remind_in(minutes=数字, text="要说的话") 或 remind_at(time="18:30", text="...")；查已排的提醒用 remind_list。
 
-【9 给用户看图】用户要看画面/截图时，直接调 http_share_screenshot（它会截屏、放进已启动的文件服务并返回手机可打开的链接），然后把返回里的 markdown 那一行原样发出来——多数客户端会直接渲染成图片，没有也能点链接。不要自己手搓文件服务器、也不要只丢裸链接。
+【9 给用户看图/听声/拿文件】要给人看画面直接调 send_screen（截屏→上传→返回链接），要看某张图用 send_image，要把一段话说出来用 send_voice，要交文件用 send_file，要给链接或口令用 send_qr。把返回里的 markdown 行/url 原样发出来即可（多数客户端会直接显示图片；音频与文件点开就能用）。不要自己手搓文件服务器、也不要只丢一个裸路径。
+
+【10 计划的验证】计划里标了「需要验证」的步骤，plan_done 必须带上 verify_evidence（用一次**新的**工具读取作为证据，例如重新列一次目录确认文件真的在），否则系统会拒绝。步骤失败时先换策略重试（换工具/换参数/换顺序），不要只解释原因。
+
+【11 设备未批准】如果请求被拒并提示 device_not_approved，说明用户在控制台还没批准这台设备：告诉用户「请在控制台 /dashboard 里批准」，不要反复重试。
 
 【8 完成度】只有工具真的返回了结果才算完成；没返回就不许说「已完成」，也不许凭猜测描述屏幕内容。"""
 
@@ -726,6 +730,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     # -------------------------------------------------------------------- routes
     def do_GET(self):
+        # 4.0: the proxy is the phone-facing port, so outbox links are served here too.
+        if self.path.startswith("/out/"):
+            bridge.serve_outbox(self, self.path[len("/out/"):].split("?")[0])
+            return
         if "models" in self.path:
             models = list(proxy_cfg().get("tool_models") or [])
             try:
@@ -755,6 +763,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._json({"error": {"message": "bad json: %s" % exc}}, 400)
             return
         auth = self.headers.get("Authorization", "")
+        bridge.note_client_host(self.headers.get("Host", ""))   # best base URL for outbox links
         model = body.get("model") or ""
         wanted = proxy_cfg().get("tool_models") or []
         if wanted and model not in wanted:
@@ -766,6 +775,23 @@ class ProxyHandler(BaseHTTPRequestHandler):
         # 3.0: which identity is asking decides the tool set and the upstream.
         profile_name, profile_cfg = resolve_profile(body, auth, self.headers.get("X-Profile", ""))
         bridge.set_active_profile(profile_name)
+        # 4.0: with devices.mode=allowlist only approved devices may drive this PC.
+        token = (auth or "").replace("Bearer ", "").strip()
+        mode = bridge.devices_mode()
+        device = None
+        if mode == "allowlist":
+            device = bridge.device_store().identify(token)
+            if not device:
+                pending = bridge.device_store().remember_pending(
+                    token, self.headers.get("User-Agent", ""), self.client_address[0] if self.client_address else "")
+                bridge.METRICS["errors_total"] = bridge.METRICS.get("errors_total", 0) + 1
+                log("device NOT approved (key=%s, pending=%s) -> refusing" % (pending.get("masked"), pending.get("id")))
+                self._json({"error": {
+                    "message": "this device is not approved yet. Open the console at /dashboard (or run "
+                               "--devices) and approve %s, then try again." % pending.get("id"),
+                    "type": "device_not_approved", "pending_id": pending.get("id")}}, 401)
+                return
+            log("  device=%s (%s)" % (device["id"], device.get("name")))
         if profile_name:
             log("  profile=%s (tools=%s upstream=%s model=%s)"
                 % (profile_name, len(profile_cfg.get("tools") or []) or "all",

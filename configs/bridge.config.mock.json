@@ -30,6 +30,14 @@
   "memory": {
     "auto_index": false
   },
+  "outbox": {
+    "dir": "",
+    "ttl": 600,
+    "max_items": 50
+  },
+  "devices": {
+    "mode": "off"
+  },
   "plans": {
     "db": ""
   },
@@ -107,6 +115,8 @@
     { "name": "jobs", "enabled": true },
     { "name": "memory", "enabled": true },
     { "name": "plan", "enabled": true },
-    { "name": "audit", "enabled": true }
+    { "name": "audit", "enabled": true },
+    { "name": "send", "enabled": true },
+    { "name": "device", "enabled": true }
   ]
 }
