@@ -167,9 +167,22 @@ def run_tool_loop(body, auth):
     extra = {k: v for k, v in body.items() if k in ("temperature", "top_p", "max_tokens", "frequency_penalty", "presence_penalty", "response_format")}
     steps = []
     message = {}
-    for round_no in range(int(proxy_cfg().get("max_tool_rounds", 6)) + 1):
+    cfg = proxy_cfg()
+    rounds = max(1, int(cfg.get("max_tool_rounds", 12) or 12))
+    budget = float(cfg.get("max_seconds", 420) or 0)
+    started = time.time()
+    for round_no in range(rounds + 1):
+        elapsed = time.time() - started
+        if budget and elapsed > budget:
+            log("  time budget %.0fs reached after %d step(s) -> wrapping up" % (budget, len(steps)))
+            done = ", ".join(step["tool"] for step in steps[-10:]) or "什么都没来得及做"
+            note = "（我已经连续操作了 %.0f 秒，先停在这里。这轮做过的动作：%s）" % (elapsed, done)
+            message = {"role": "assistant",
+                       "content": ((message.get("content") or "").strip() + "\n" + note).strip()}
+            return message, steps, {}
+        last_round = round_no >= rounds
         payload = {"model": model, "messages": messages, "stream": False,
-                   "tools": tools, "tool_choice": "auto"}
+                   "tools": tools, "tool_choice": "none" if last_round else "auto"}
         payload.update(extra)
         data = upstream_post("/chat/completions", payload, auth)
         choice = (data.get("choices") or [{}])[0]
@@ -212,12 +225,18 @@ def run_tool_loop(body, auth):
             steps.append({"tool": name, "arguments": args, "error": is_error, "output": output[:4000]})
             messages.append({"role": "tool", "tool_call_id": call.get("id") or name,
                              "content": ("[tool failed] " if is_error else "") + output[:6000]})
+    # Round budget exhausted. Never hand the app a dangling tool_call: keep only text.
+    if message.get("tool_calls"):
+        log("  round budget exhausted with a pending tool_call -> dropping it")
+        message = {"role": "assistant", "content": (message.get("content") or "").strip()
+                   or "（这轮动作做到上限了，我先停一下）"}
     return message, steps, {}
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "mcp-hands/1.0"
+    _write_lock = threading.Lock()
 
     def log_message(self, fmt, *args):
         pass
@@ -240,7 +259,70 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _chunk(self, text):
         data = text.encode("utf-8")
-        self.wfile.write(("%X\r\n" % len(data)).encode("ascii") + data + b"\r\n")
+        with self._write_lock:
+            self.wfile.write(("%X\r\n" % len(data)).encode("ascii") + data + b"\r\n")
+            self.wfile.flush()
+
+    def _start_heartbeat(self):
+        """Keep the SSE connection warm while slow tools (screenshots, vision) run.
+
+        A tool loop can easily take 30-120 s, and the phone app drops the request
+        ("思考中断") when nothing arrives for a while. Comment frames are valid SSE,
+        are ignored by every client, and reset that idle timer. They also prove to us
+        that the socket is still alive.
+        """
+        interval = float(proxy_cfg().get("heartbeat_seconds", 5) or 0)
+        if interval <= 0:
+            return None
+        stop = threading.Event()
+
+        def beat():
+            while not stop.wait(interval):
+                try:
+                    self._chunk(": keep-alive\n\n")
+                except Exception:  # noqa: BLE001 - client hung up; nothing to clean here
+                    return
+
+        threading.Thread(target=beat, daemon=True, name="sse-heartbeat").start()
+        return stop
+
+    def _run_loop_streaming(self, body, auth, model):
+        """Open the SSE stream *before* the tool loop, so the app never sits in silence."""
+        self._sse_start()
+        self._sse_open = True
+        self._chunk("data: " + json.dumps({
+            "id": "chatcmpl-" + uuid.uuid4().hex[:20], "object": "chat.completion.chunk",
+            "created": int(time.time()), "model": model,
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]},
+            ensure_ascii=False) + "\n\n")
+        stop = self._start_heartbeat()
+        started = time.time()
+        try:
+            result = run_tool_loop(body, auth)
+        finally:
+            if stop:
+                stop.set()
+            log("  tool loop finished in %.1fs (heartbeats %s)"
+                % (time.time() - started, "on" if stop else "off"))
+        return result
+
+    def _finish_stream(self, error_text):
+        """Close an already-open SSE stream with a visible reason instead of silence."""
+        cid = "chatcmpl-" + uuid.uuid4().hex[:20]
+        created = int(time.time())
+
+        def frame(delta, finish=None):
+            self._chunk("data: " + json.dumps({
+                "id": cid, "object": "chat.completion.chunk", "created": created, "model": "proxy",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}, ensure_ascii=False) + "\n\n")
+
+        try:
+            frame({"content": "（电脑侧执行出错：%s）" % error_text[:400]})
+            frame({}, "stop")
+            self._chunk("data: [DONE]\n\n")
+            self.wfile.write(b"0\r\n\r\n")
+        except Exception:  # noqa: BLE001
+            pass
 
     def _relay(self, body, auth, path):
         try:
@@ -265,7 +347,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"0\r\n\r\n")
         upstream.close()
 
-    def _reply_stream(self, message, model, usage):
+    def _reply_stream(self, message, model, usage, sse_started=False):
         cid = "chatcmpl-" + uuid.uuid4().hex[:20]
         created = int(time.time())
 
@@ -274,8 +356,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
                    "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
             self._chunk("data: " + json.dumps(obj, ensure_ascii=False) + "\n\n")
 
-        self._sse_start()
-        frame({"role": "assistant", "content": ""})
+        if not sse_started:
+            self._sse_start()
+            frame({"role": "assistant", "content": ""})
         reasoning = message.get("reasoning_content")
         if reasoning:
             self._chunk("data: " + json.dumps({
@@ -334,20 +417,29 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if token:
             log("  remembered the app's key (%s...) for vision calls" % token[:6])
         try:
-            message, steps, usage = run_tool_loop(body, auth)
+            self._write_lock = threading.Lock()
+            self._sse_open = False
+            message, steps, usage = self._run_loop_streaming(body, auth, model) if body.get("stream") \
+                else run_tool_loop(body, auth)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")
             log("  upstream HTTP %s: %s" % (exc.code, detail[:300]))
+            if body.get("stream") and self._sse_open:
+                self._finish_stream("upstream HTTP %s: %s" % (exc.code, detail[:300]))
+                return
             self._json({"error": {"message": "upstream HTTP %s: %s" % (exc.code, detail[:600]),
                                   "type": "upstream_error"}}, 502)
             return
         except Exception as exc:  # noqa: BLE001
             log("  failed: %s: %s" % (type(exc).__name__, exc))
+            if body.get("stream") and self._sse_open:
+                self._finish_stream("%s: %s" % (type(exc).__name__, exc))
+                return
             self._json({"error": {"message": "%s: %s" % (type(exc).__name__, exc), "type": "proxy_error"}}, 502)
             return
 
         if body.get("stream"):
-            self._reply_stream(message, model, usage)
+            self._reply_stream(message, model, usage, sse_started=self._sse_open)
             return
         self._json({
             "id": "chatcmpl-" + uuid.uuid4().hex[:20],

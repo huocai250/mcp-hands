@@ -27,7 +27,9 @@
     "upstream_base": "https://api.deepseek.com/v1",
     "upstream_api_key": "",
     "tool_models": ["deepseek-flash", "deepseek-chat", "deepseek-reasoner"],
-    "max_tool_rounds": 6,
+    "max_tool_rounds": 12,
+    "max_seconds": 420,
+    "heartbeat_seconds": 5,
     "inject_tool_hint": true
   },
   "servers": [

@@ -32,7 +32,7 @@ sys.path.insert(0, HERE)
 
 # ------------------------------------------------------------------ branding
 APP_NAME = "mcp-hands"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 APP_AUTHOR = "huocai250"
 APP_URL = "https://github.com/huocai250/mcp-hands"
 APP_LICENSE = "MIT"
@@ -97,6 +97,7 @@ DEFAULT_CONFIG = {
         "api_key": "",
         "model": "deepseek-flash",
         "detail": "auto",
+        "thinking": "disabled",
         "max_pixels": 1300,
         "inherit_upstream_key": True,
     },
@@ -196,6 +197,7 @@ def start_hub():
                          "MCP_VISION_API_KEY": vision.get("api_key", ""),
                          "MCP_VISION_MODEL": vision.get("model", ""),
                          "MCP_VISION_DETAIL": vision.get("detail", ""),
+                         "MCP_VISION_THINKING": vision.get("thinking", ""),
                          "MCP_VISION_MAX_PIXELS": vision.get("max_pixels", "")}
         HUB = ToolHub(CFG.get("servers", []), cwd=BASE_DIR, log=lambda m: log("  " + m),
                       entry=None if FROZEN else os.path.join(HERE, "bridge.py"),

@@ -59,6 +59,10 @@ def _cfg(overrides=None):
         "api_key": key,
         "model": overrides.get("model") or _env("MCP_VISION_MODEL", DEFAULT_MODEL),
         "detail": overrides.get("detail") or _env("MCP_VISION_DETAIL", "auto"),
+        # DeepSeek's flash model thinks by default, and with thinking on a modest max_tokens
+        # can be swallowed by reasoning_content, leaving `content` empty. Vision work does not
+        # need the chain of thought, so thinking is switched off here.
+        "thinking": overrides.get("thinking", _env("MCP_VISION_THINKING", "disabled")),
         "max_pixels": int(_env("MCP_VISION_MAX_PIXELS", "1300")),
         "timeout": float(_env("MCP_VISION_TIMEOUT_S", "120")),
     }
@@ -79,7 +83,7 @@ def _prepare(image, max_pixels=0, quality=85):
     return buffer.getvalue(), image.size
 
 
-def _ask(images, question, max_tokens=1024, temperature=0.1, overrides=None):
+def _ask(images, question, max_tokens=2048, temperature=0.1, overrides=None):
     """images: list of JPEG bytes. Returns the model's text answer."""
     cfg = _cfg(overrides)
     if not cfg["api_key"]:
@@ -94,29 +98,52 @@ def _ask(images, question, max_tokens=1024, temperature=0.1, overrides=None):
                                       "detail": cfg["detail"]}})
     body = {"model": cfg["model"], "messages": [{"role": "user", "content": content}],
             "max_tokens": int(max_tokens), "temperature": float(temperature), "stream": False}
-    request = urllib.request.Request(
-        cfg["base_url"] + "/chat/completions", data=json.dumps(body).encode("utf-8"), method="POST",
-        headers={"Content-Type": "application/json", "Authorization": "Bearer " + cfg["api_key"]})
-    try:
+    if cfg.get("thinking"):
+        body["thinking"] = {"type": cfg["thinking"]}
+
+    def send(payload):
+        request = urllib.request.Request(
+            cfg["base_url"] + "/chat/completions", data=json.dumps(payload).encode("utf-8"), method="POST",
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + cfg["api_key"]})
         with urllib.request.urlopen(request, timeout=cfg["timeout"]) as response:
-            payload = json.loads(response.read().decode("utf-8", "replace"))
+            return json.loads(response.read().decode("utf-8", "replace"))
+
+    try:
+        payload = send(body)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")
-        hint = ""
-        if exc.code == 401:
-            hint = " (检查 vision.api_key / 上游 key 是否正确)"
-        elif exc.code == 404:
-            hint = " (检查 vision.model；DeepSeek 上用 deepseek-flash，它才支持图片)"
-        elif exc.code == 400 and "image" in detail.lower():
-            hint = " (图片格式/大小不被接受：支持 JPEG/PNG/GIF/WebP，单图 <= 32 MiB)"
-        raise RuntimeError("vision endpoint HTTP %s: %s%s" % (exc.code, detail[:400], hint)) from None
+        if exc.code == 400 and "thinking" in detail.lower() and "thinking" in body:
+            # Some OpenAI-compatible endpoints do not know the DeepSeek-only field.
+            body.pop("thinking", None)
+            try:
+                payload = send(body)
+            except urllib.error.HTTPError as exc2:
+                detail = exc2.read().decode("utf-8", "replace")
+                raise RuntimeError("vision endpoint HTTP %s: %s" % (exc2.code, detail[:400])) from None
+        else:
+            hint = ""
+            if exc.code == 401:
+                hint = " (检查 vision.api_key / 上游 key 是否正确)"
+            elif exc.code == 404:
+                hint = " (检查 vision.model；DeepSeek 上用 deepseek-flash，它才支持图片)"
+            elif exc.code == 400 and "image" in detail.lower():
+                hint = " (图片格式/大小不被接受：支持 JPEG/PNG/GIF/WebP，单图 <= 32 MiB)"
+            raise RuntimeError("vision endpoint HTTP %s: %s%s" % (exc.code, detail[:400], hint)) from None
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("vision endpoint error: %s" % exc) from None
     choices = payload.get("choices") or []
     message = (choices[0].get("message") if choices else {}) or {}
     text = (message.get("content") or "").strip()
     if not text:
-        raise RuntimeError("vision model returned an empty answer: %s" % json.dumps(payload)[:300])
+        # Thinking mode puts the chain of thought in reasoning_content and can leave
+        # `content` empty when max_tokens runs out mid-thought. Never lose the answer.
+        reasoning = (message.get("reasoning_content") or "").strip()
+        if reasoning:
+            log_note = "[vision] answer came back as reasoning_content (thinking mode ran long)"
+            return reasoning + "\n" + log_note
+        finish = (choices[0].get("finish_reason") if choices else "") or "?"
+        raise RuntimeError("vision model returned an empty answer (finish_reason=%s): %s"
+                           % (finish, json.dumps(payload, ensure_ascii=False)[:300]))
     return text
 
 
@@ -204,6 +231,7 @@ def vision_status():
         "base_url=%s" % cfg["base_url"],
         "model=%s" % cfg["model"],
         "detail=%s" % cfg["detail"],
+        "thinking=%s" % (cfg["thinking"] or "endpoint default"),
         "max_pixels=%d" % cfg["max_pixels"],
         "api_key=%s" % ("set (%d chars)" % len(cfg["api_key"]) if cfg["api_key"] else "NOT SET"),
         "note=DeepSeek 的 deepseek-flash 支持图片；走 App 直连代理时会自动沿用 App 里的 key",
@@ -218,7 +246,8 @@ def vision_probe(api_key="", model=""):
     image = Image.new("RGB", (96, 96), (30, 90, 200))
     raw, size = _prepare(image, max_pixels=512)
     started = time.time()
-    answer = _ask([raw], "这张图是什么颜色？只回答颜色名。", max_tokens=32, overrides=_overrides(api_key, model, detail="low"))
+    answer = _ask([raw], "这张图是什么颜色？只回答颜色名。", max_tokens=64,
+                  overrides=_overrides(api_key, model, detail="low"))
     return "%s\nanswer=%s" % (_stamp(size, int((time.time() - started) * 1000), model), answer[:200])
 
 
