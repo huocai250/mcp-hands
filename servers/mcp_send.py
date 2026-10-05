@@ -41,7 +41,12 @@ def _api(path, payload=None, method="GET", timeout=60):
 
 
 def _deliver(path, kind, note="", ttl=0, once=False, label="", cleanup=False):
-    """Hand a file to the outbox and format the answer the persona should send.
+    """Hand a file to the outbox and answer with the raw URL, nothing else.
+
+    4.1.1 - measured against the real client: it does **not** render markdown
+    (`![](url)` shows up as dead text) but it does fetch a **bare URL** and draw the
+    picture in the bubble. So the whole answer is the URL on one line: anything else we
+    add (url=, 说明, 编号, markdown) ends up in the user's chat as garbage.
 
     cleanup=True deletes the *source* file afterwards - that is what generated media
     (screenshots, QR images, speech) needs, otherwise %TEMP% grows without end.
@@ -58,27 +63,7 @@ def _deliver(path, kind, note="", ttl=0, once=False, label="", cleanup=False):
             pass
     if error:
         return "could not deliver %s: %s" % (label or path, error)
-    item = data.get("item") or {}
-    url = item.get("url") or ""
-    if kind in ("image", "qr"):
-        # 4.1: lead with the markdown line and keep the raw URL out of the way. The model
-        # used to echo "url=…" as chat text, which shows up as an ugly unclickable link
-        # instead of the picture.
-        return ("![%s](%s)\n"
-                "把上面这一行（从 ! 到右括号）整行原样发出去，客户端就会直接显示图片。\n"
-                "不要发 url=、不要发“发送成功”之类的回执、不要改这一行。\n"
-                "(内部信息，给机器看的: kind=%s bytes=%s id=%s)"
-                % (note or "图片", url, item.get("kind"), item.get("bytes"), item.get("id")))
-    lines = ["delivered %s" % (label or item.get("name") or path),
-             "kind=%s bytes=%s expires_in=%ss" % (item.get("kind"), item.get("bytes"),
-                                                  int(float(item.get("expires") or 0) - __import__("time").time())),
-             "url=%s" % url]
-    if kind == "audio":
-        lines.append("tell the user=如果用户开着语音页（/voice），直接用 call_say 让她说话更好；"
-                     "这份音频文件只是备份，把链接给用户即可")
-    else:
-        lines.append("tell the user=把链接给用户，他点开就能拿到文件")
-    return "\n".join(lines)
+    return (data.get("item") or {}).get("url") or "delivered, but the bridge returned no url"
 
 
 def _grab_screen(monitor="primary"):

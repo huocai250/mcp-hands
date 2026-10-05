@@ -303,15 +303,18 @@ except Exception as exc:  # noqa: BLE001
     page, voice_page_ok = str(exc), False
 report(17, "the voice page reaches the phone with TTS wired up", not voice_page_ok, page[:60])
 
-# 18. sending an image must hand back the markdown line, not a bare url
+# 18. sending an image must answer with the bare URL and nothing else (measured against
+# the real client: markdown is shown as dead text, a bare URL is fetched and drawn)
 img = os.path.join(STATE, "pic.png")
 with open(img, "wb") as fh:
     fh.write(b"\x89PNG\r\n\x1a\n" + b"0" * 40)
 delivered, err_img = hub.call("send_send_image", {"path": img, "note": "测试图"})
-first = (delivered or "").splitlines()[0] if delivered else ""
-report(18, "send_image answers with a markdown image line first",
-       not (first.startswith("![") and "](http" in first and "url=" not in first),
-       "first line: %s" % first[:80])
+lines = [line for line in (delivered or "").splitlines() if line.strip()]
+first = lines[0] if lines else ""
+report(18, "send_image answers with exactly one bare URL",
+       not (len(lines) == 1 and first.startswith("http") and "/out/" in first
+            and "url=" not in first and "![" not in first),
+       "lines=%d first=%s" % (len(lines), first[:80]))
 
 # 19. the fs sandbox boundary is visible without guessing
 health = get("/v2/health")
