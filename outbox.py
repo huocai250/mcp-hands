@@ -82,15 +82,22 @@ class Outbox:
         return record
 
     def add_bytes(self, data, name="item.bin", kind="file", ttl=None, once=False, note=""):
-        tmp = os.path.join(self.files, "incoming_" + uuid.uuid4().hex[:8])
-        with open(tmp, "wb") as fh:
-            fh.write(data)
+        """Same as add(), for bytes the caller already has in memory."""
+        incoming = os.path.join(self.files, "incoming_" + uuid.uuid4().hex[:8])
         try:
-            return self.add(tmp, kind=kind, ttl=ttl, once=once, note=note)
+            with open(incoming, "wb") as fh:
+                fh.write(data)
+            record = self.add(incoming, kind=kind, ttl=ttl, once=once, note=note)
+            if name:
+                record["name"] = str(name)
+                with self._lock:
+                    if record["id"] in self._index:
+                        self._index[record["id"]]["name"] = str(name)
+                        self._save()
+            return record
         finally:
-            record = self._index.get(os.path.basename(tmp))
             try:
-                os.remove(tmp)
+                os.remove(incoming)
             except OSError:
                 pass
 
@@ -111,6 +118,8 @@ class Outbox:
         expected = _token_secret(self.secret, item_id, record["expires"], record.get("once"))
         if not hmac.compare_digest(expected, signature):
             return None, "bad signature"
+        if record.get("once") and int(record.get("fetches") or 0) > 0:
+            return None, "already used (one-shot link)"
         path = record.get("stored")
         if not path or not os.path.isfile(path):
             return None, "file is gone"

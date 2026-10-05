@@ -16,14 +16,25 @@ if not ROOTS:
 
 
 def _check(path):
-    p = os.path.abspath(os.path.expanduser(str(path)))
+    """Resolve a path and make sure it is really inside an allowed root.
+
+    realpath (not abspath) on purpose: a symlink or a Windows directory junction placed
+    inside an allowed folder would otherwise let reads and writes escape the sandbox.
+    """
+    p = os.path.realpath(os.path.expanduser(str(path)))
+    if os.path.isdir(p) or p.endswith(os.sep):
+        candidate = p
+    else:
+        # Writers may target a file that does not exist yet: check its parent too.
+        candidate = os.path.dirname(p) or p
     for root in ROOTS:
-        try:
-            if os.path.commonpath([os.path.normcase(root), os.path.normcase(p)]) == os.path.normcase(root):
-                return p
-        except ValueError:
-            continue  # different drive
-    # Point at the exact fix instead of just refusing: the roots come from the config.
+        real_root = os.path.realpath(root)
+        for probe in (p, candidate):
+            try:
+                if os.path.commonpath([os.path.normcase(real_root), os.path.normcase(probe)]) == os.path.normcase(real_root):
+                    return p
+            except ValueError:
+                continue  # different drive
     raise PermissionError(
         "%s is outside the allowed roots (%s). Ask the user to add that folder in the console "
         "(文件根目录 field) or to MCP_FS_ROOTS in bridge.config.json; call fs_roots to see the list."

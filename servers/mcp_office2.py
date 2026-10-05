@@ -548,7 +548,6 @@ def xlsx_chart(path, out="", kind="bar", data_range="", title=""):
     values.append(["category", "series"])
     for i in range(min_col, max_col + 1):
         if min_row < max_row:
-            col_name = _cell(ws.cell(row=min_row, column=i).value) or "col%d" % i
             for r in range(min_row + 1, max_row + 1):
                 cat = _cell(ws.cell(row=r, column=min_col).value)
                 if i == min_col:

@@ -13,7 +13,6 @@ import re
 import sqlite3
 import threading
 import time
-
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS calls (
   id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,17 +33,29 @@ CREATE INDEX IF NOT EXISTS calls_tool ON calls(tool);
 SECRET_HINTS = ("api_key", "apikey", "authorization", "token", "password", "secret")
 
 
-def mask_args(args):
-    """Never store credentials in the audit log."""
-    if not isinstance(args, dict):
-        return args
-    safe = {}
-    for key, value in args.items():
-        if any(hint in str(key).lower() for hint in SECRET_HINTS) and isinstance(value, str) and value:
-            safe[key] = (value[:6] + "…" + value[-4:]) if len(value) > 12 else "***"
-        else:
-            safe[key] = value
-    return safe
+def mask_args(args, depth=0):
+    """Never store credentials in the audit log - including ones nested in dicts/lists.
+
+    Models happily write {"headers": {"Authorization": "Bearer sk-…"}}, so masking only
+    the top level would still leak the key into audit.db.
+    """
+    if depth > 4:
+        return "…"
+    if isinstance(args, dict):
+        safe = {}
+        for key, value in args.items():
+            if any(hint in str(key).lower() for hint in SECRET_HINTS) and isinstance(value, (str, int)):
+                text = str(value)
+                safe[key] = (text[:6] + "…" + text[-4:]) if len(text) > 12 else "***"
+            else:
+                safe[key] = mask_args(value, depth + 1)
+        return safe
+    if isinstance(args, list):
+        return [mask_args(item, depth + 1) for item in args[:50]]
+    if isinstance(args, str):
+        # A bare key pasted into an argument (a path holding a token, an URL) is masked too.
+        return re.sub(r"(?i)\b(sk-[A-Za-z0-9_\-]{12,})", lambda m: m.group(1)[:6] + "…" + m.group(1)[-4:], args)
+    return args
 
 
 class AuditStore:

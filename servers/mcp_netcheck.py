@@ -12,7 +12,6 @@ import socket
 import ssl
 import subprocess
 import sys
-import threading
 import time
 import urllib.error
 import urllib.parse
@@ -323,7 +322,7 @@ def http_timing(url, count=3):
             attempted.append(alt)
             alt_runs, alt_errs, _h = _timing_run(alt, n)
             if alt_runs:
-                runs, host, used = alt_runs, _h, alt
+                runs, used = alt_runs, alt
                 errs = ["%s unreachable (%s)" % (u, errs[0] if errs else "unknown")] + alt_errs
                 break
             errs.extend(alt_errs)

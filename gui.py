@@ -29,13 +29,38 @@ ARGV = sys.argv[1:]
 # Honour an explicit config (--config X or a bare path) instead of always using the
 # machine config next to the executable; otherwise `exe some.config.json --tools`
 # would silently read the wrong file.
+#
+# 4.0.1: only *bare* arguments count. This used to be "the first argument that is not a
+# flag", so the value of any flag became the config path - `exe --backup D:\x.zip`,
+# `exe --limit 20`, `exe --devices-approve pend_x` all elected a bogus config, and the
+# bridge then wrote a fresh default config to that path.
+VALUE_FLAGS = ("--config", "--limit", "--backup", "--restore", "--devices-approve",
+               "--devices-revoke", "--jobs-run", "--name", "--port", "--mcp-server")
+
+
+def _bare_args(args):
+    out = []
+    skip_next = False
+    for token in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in VALUE_FLAGS:
+            skip_next = True
+            continue
+        if token.startswith("--"):
+            continue
+        out.append(token)
+    return out
+
+
 _explicit_config = None
 if "--config" in ARGV:
     _index = ARGV.index("--config")
     if _index + 1 < len(ARGV):
         _explicit_config = ARGV[_index + 1]
 else:
-    _explicit_config = next((a for a in ARGV if not a.startswith("--")), None)
+    _explicit_config = next(iter(_bare_args(ARGV)), None)
 CONFIG_PATH = os.path.abspath(os.environ.get("BRIDGE_CONFIG") or _explicit_config
                               or os.path.join(BASE_DIR, "bridge.config.json"))
 os.environ["BRIDGE_CONFIG"] = CONFIG_PATH
@@ -75,7 +100,8 @@ def hide_console():
 
 
 CLI_FLAGS = ("--tools", "--self-test", "--doctor", "--version", "--init", "--jobs",
-             "--jobs-run", "--migrate", "--audit", "--plans", "--devices", "--outbox",
+             "--jobs-run", "--migrate", "--audit", "--plans", "--devices",
+             "--devices-approve", "--devices-revoke", "--outbox",
              "--backup", "--restore", "--check-update")
 
 
@@ -83,6 +109,15 @@ def main():
     wanted = [flag for flag in CLI_FLAGS if flag in ARGV]
     if wanted:
         raise SystemExit(bridge.run_command(wanted[0]))
+    # 4.0.1: an unlisted flag used to fall through to the GUI, so a mistyped (or simply
+    # never-listed) command opened a window and looked hung. Only complain when the
+    # arguments actually look like a command; a bare double-click still opens the GUI.
+    gui_ok = ("--serve", "--autostart", "--proxy", "--config")
+    stray = [token for token in ARGV if token.startswith("--") and token not in gui_ok]
+    if stray:
+        print("unknown option(s): %s" % ", ".join(stray))
+        print("known commands: %s" % ", ".join(CLI_FLAGS))
+        raise SystemExit(2)
     try:
         import tkinter  # noqa: F401
     except ImportError:
@@ -96,8 +131,8 @@ def main():
 
 
 # --------------------------------------------------------------------------- UI
-from tkinter import (BOTH, END, HORIZONTAL, LEFT, RIGHT, VERTICAL, W, X, Y, BooleanVar, Canvas,  # noqa: E402
-                     StringVar, Tk, Toplevel, filedialog, messagebox, scrolledtext, ttk)
+from tkinter import (BOTH, END, LEFT, RIGHT, VERTICAL, W, X, Y, BooleanVar, Canvas,  # noqa: E402
+                     StringVar, Tk, Toplevel, messagebox, scrolledtext, ttk)
 
 SETTINGS_PATH = os.path.join(BASE_DIR, "gui-settings.json")
 

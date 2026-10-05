@@ -6,9 +6,9 @@ expires, so the phone can open it from the same Wi-Fi without exposing a folder.
 `send_screen` replaces hand-rolled file servers; `send_voice` renders Chinese text to a
 WAV with the built-in Windows synthesiser, so the persona can actually say something.
 """
-import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -17,7 +17,7 @@ import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mcpserver import Server, sample_dir  # noqa: E402
+from mcpserver import Server  # noqa: E402
 
 API = (os.environ.get("MCP_BRIDGE_API") or "http://127.0.0.1:8877").rstrip("/")
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
@@ -40,13 +40,22 @@ def _api(path, payload=None, method="GET", timeout=60):
         return {}, "%s: %s (is the bridge running? expected at %s)" % (type(exc).__name__, exc, API)
 
 
-def _deliver(path, kind, note="", ttl=0, once=False, label=""):
-    """Hand a file to the outbox and format the answer the persona should send."""
+def _deliver(path, kind, note="", ttl=0, once=False, label="", cleanup=False):
+    """Hand a file to the outbox and format the answer the persona should send.
+
+    cleanup=True deletes the *source* file afterwards - that is what generated media
+    (screenshots, QR images, speech) needs, otherwise %TEMP% grows without end.
+    """
     payload = {"path": os.path.abspath(os.path.expanduser(str(path))), "kind": kind,
                "note": note, "once": bool(once)}
     if ttl:
         payload["ttl"] = float(ttl)
     data, error = _api("/v2/outbox", payload, method="POST")
+    if cleanup:
+        try:
+            os.remove(payload["path"])
+        except OSError:
+            pass
     if error:
         return "could not deliver %s: %s" % (label or path, error)
     item = data.get("item") or {}
@@ -55,7 +64,7 @@ def _deliver(path, kind, note="", ttl=0, once=False, label=""):
              "kind=%s bytes=%s expires_in=%ss" % (item.get("kind"), item.get("bytes"),
                                                   int(float(item.get("expires") or 0) - __import__("time").time())),
              "url=%s" % url]
-    if kind == "image" or kind == "qr":
+    if kind in ("image", "qr"):
         lines.append("markdown=![%s](%s)" % (note or "media", url))
         lines.append("tell the user=把上面的 markdown 行原样发出来，客户端会直接显示图片")
     elif kind == "audio":
@@ -89,7 +98,8 @@ def send_screen(note="", monitor="primary", ttl=0, once=False):
     image = _grab_screen(monitor)
     out = os.path.join(TMP, "mcp-hands-send-%s.png" % __import__("time").strftime("%Y%m%d-%H%M%S"))
     image.save(out, format="PNG")
-    return _deliver(out, "image", note=note or "屏幕截图", ttl=ttl, once=once, label="screenshot")
+    return _deliver(out, "image", note=note or "屏幕截图", ttl=ttl, once=once, label="screenshot",
+                    cleanup=True)
 
 
 @srv.tool("send_image", "Send an image file on this PC to the user (returns a URL they can open).",
@@ -120,10 +130,14 @@ def send_file(path, note="", ttl=0, once=False):
           {"type": "object", "properties": {"text": {"type": "string"}, "name": {"type": "string", "default": "note.md"},
                                             "ttl": {"type": "integer", "default": 0}}, "required": ["text"]})
 def send_text(text, name="note.md", ttl=0):
-    out = os.path.join(TMP, str(name or "note.md"))
+    # Never trust the name: a crafted value like "..\\..\\x.txt" would otherwise write
+    # outside the scratch folder.
+    safe = os.path.basename(str(name or "note.md").replace("\\", "/")) or "note.md"
+    safe = re.sub(r"[<>:\"|?*\x00-\x1f]", "_", safe)[:80] or "note.md"
+    out = os.path.join(TMP, "mcp-hands-text-%s-%s" % (__import__("time").strftime("%Y%m%d-%H%M%S"), safe))
     with open(out, "w", encoding="utf-8") as fh:
         fh.write(str(text))
-    return _deliver(out, "text", note=name, ttl=ttl)
+    return _deliver(out, "text", note=safe, ttl=ttl, cleanup=True)
 
 
 @srv.tool("send_qr", "Turn a URL or some text into a QR image and send it (e.g. to hand a link to a phone).",
@@ -136,7 +150,7 @@ def send_qr(text, note="", ttl=0):
         return "qrcode is not available in this build"
     out = os.path.join(TMP, "mcp-hands-qr-%s.png" % __import__("time").strftime("%Y%m%d-%H%M%S"))
     qrcode.make(str(text)).save(out)
-    return _deliver(out, "qr", note=note or "二维码", ttl=ttl)
+    return _deliver(out, "qr", note=note or "二维码", ttl=ttl, cleanup=True)
 
 
 @srv.tool("send_voice", "Say something out loud as an audio file: renders text to speech and sends the link "
@@ -147,6 +161,10 @@ def send_voice(text, speak_here=False, ttl=0):
     body = str(text or "").strip()
     if not body:
         return "send_voice: nothing to say"
+    if len(body) > 1200:
+        # The synthesiser runs through a command line; a wall of text would be cut off
+        # (or fail outright), so say the important part and keep the rest as a note.
+        body = body[:1200]
     out = os.path.join(TMP, "mcp-hands-voice-%s.wav" % __import__("time").strftime("%Y%m%d-%H%M%S"))
     safe = body.replace("'", "''")
     script = (
@@ -165,7 +183,7 @@ def send_voice(text, speak_here=False, ttl=0):
         return "text-to-speech failed: %s" % exc
     if not os.path.isfile(out):
         return "text-to-speech produced no audio: %s" % text_out.strip()[:200]
-    result = _deliver(out, "audio", note=body[:40], ttl=ttl, label="voice")
+    result = _deliver(out, "audio", note=body[:40], ttl=ttl, label="voice", cleanup=not speak_here)
     if speak_here:
         play = (
             "Add-Type -AssemblyName System.Media;"

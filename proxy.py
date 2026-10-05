@@ -765,6 +765,23 @@ class ProxyHandler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization", "")
         bridge.note_client_host(self.headers.get("Host", ""))   # best base URL for outbox links
         model = body.get("model") or ""
+        # 4.0: the device allowlist must gate *every* request, including the relay path
+        # for models that are not in tool_models (that used to slip through).
+        token = (auth or "").replace("Bearer ", "").strip()
+        if bridge.devices_mode() == "allowlist":
+            device = bridge.device_store().identify(token)
+            if not device:
+                pending = bridge.device_store().remember_pending(
+                    token, self.headers.get("User-Agent", ""),
+                    self.client_address[0] if self.client_address else "")
+                bridge.METRICS["errors_total"] = bridge.METRICS.get("errors_total", 0) + 1
+                log("device NOT approved (key=%s, pending=%s) -> refusing" % (pending.get("masked"), pending.get("id")))
+                self._json({"error": {
+                    "message": "this device is not approved yet. Open the console at /dashboard (or run "
+                               "--devices) and approve %s, then try again." % pending.get("id"),
+                    "type": "device_not_approved", "pending_id": pending.get("id")}}, 401)
+                return
+            log("  device=%s (%s)" % (device["id"], device.get("name")))
         wanted = proxy_cfg().get("tool_models") or []
         if wanted and model not in wanted:
             log("relay (no tools): model=%s stream=%s" % (model, body.get("stream")))
@@ -775,23 +792,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
         # 3.0: which identity is asking decides the tool set and the upstream.
         profile_name, profile_cfg = resolve_profile(body, auth, self.headers.get("X-Profile", ""))
         bridge.set_active_profile(profile_name)
-        # 4.0: with devices.mode=allowlist only approved devices may drive this PC.
-        token = (auth or "").replace("Bearer ", "").strip()
-        mode = bridge.devices_mode()
-        device = None
-        if mode == "allowlist":
-            device = bridge.device_store().identify(token)
-            if not device:
-                pending = bridge.device_store().remember_pending(
-                    token, self.headers.get("User-Agent", ""), self.client_address[0] if self.client_address else "")
-                bridge.METRICS["errors_total"] = bridge.METRICS.get("errors_total", 0) + 1
-                log("device NOT approved (key=%s, pending=%s) -> refusing" % (pending.get("masked"), pending.get("id")))
-                self._json({"error": {
-                    "message": "this device is not approved yet. Open the console at /dashboard (or run "
-                               "--devices) and approve %s, then try again." % pending.get("id"),
-                    "type": "device_not_approved", "pending_id": pending.get("id")}}, 401)
-                return
-            log("  device=%s (%s)" % (device["id"], device.get("name")))
         if profile_name:
             log("  profile=%s (tools=%s upstream=%s model=%s)"
                 % (profile_name, len(profile_cfg.get("tools") or []) or "all",

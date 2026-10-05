@@ -1,5 +1,4 @@
 """Isolate why the persona returns empty content: plain vs protocol-prefixed prompt."""
-import json
 import os
 import sys
 

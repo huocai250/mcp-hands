@@ -16,9 +16,11 @@ So this bridge never sends `tools` upstream. Instead it runs the tool loop
 itself with a plain-text tool protocol, talks to real MCP servers over stdio,
 and exposes a normal OpenAI-compatible endpoint to desktop clients.
 """
+import hmac
 import json
 import os
 import re
+import secrets
 import shutil
 import sys
 import threading
@@ -33,7 +35,7 @@ sys.path.insert(0, HERE)
 
 # ------------------------------------------------------------------ branding
 APP_NAME = "mcp-hands"
-APP_VERSION = "4.0.0"
+APP_VERSION = "4.0.1"
 APP_AUTHOR = "huocai250"
 APP_URL = "https://github.com/huocai250/mcp-hands"
 APP_REPO = "huocai250/mcp-hands"
@@ -65,11 +67,16 @@ if "--mcp-server" in ARGV:
     raise SystemExit(0)
 
 from audit import AuditStore, Policy  # noqa: E402
-from devices import DeviceStore, mask_key  # noqa: E402
+from devices import DeviceStore  # noqa: E402
 from jobs import JobRunner, JobStore  # noqa: E402
 from mcp_client import ToolHub  # noqa: E402
 from outbox import Outbox  # noqa: E402
 from plans import PlanStore  # noqa: E402
+
+
+#: Flags whose *next* token is a value, not a file to talk to.
+VALUE_FLAGS = ("--config", "--limit", "--backup", "--restore", "--devices-approve",
+               "--devices-revoke", "--jobs-run", "--name", "--port", "--mcp-server")
 
 
 def _opt(name, default=None):
@@ -78,6 +85,29 @@ def _opt(name, default=None):
         if index + 1 < len(ARGV):
             return ARGV[index + 1]
     return default
+
+
+def _positional_args():
+    """Bare arguments only.
+
+    Bug fix (4.0.1): this used to be "the first argument that is not a flag", which
+    meant the *value* of any flag became the config path - `--backup D:\\x.zip`,
+    `--limit 20`, `--devices-approve pend_x` all elected a bogus config and then wrote
+    a default config to that path.
+    """
+    out = []
+    skip_next = False
+    for token in ARGV[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in VALUE_FLAGS:
+            skip_next = True
+            continue
+        if token.startswith("--"):
+            continue
+        out.append(token)
+    return out
 
 
 LOG_LOCK = threading.Lock()
@@ -115,7 +145,9 @@ DASHBOARD_HTML = """<!doctype html>
 </main>
 <script>
 const API="__BRIDGE__";
-async function j(path){const r=await fetch(API+path);return r.ok?r.json():{error:r.status};}
+const TOKEN="__TOKEN__";
+function headers(extra){const h=Object.assign({"Content-Type":"application/json"},extra||{});if(TOKEN){h["X-Control-Token"]=TOKEN;}return h;}
+async function j(path){const r=await fetch(API+path,{headers:headers()});return r.ok?r.json():{error:r.status};}
 function esc(s){return String(s==null?"":s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
 function kv(o){return Object.entries(o).map(([k,v])=>`<tr><th>${esc(k)}</th><td>${esc(typeof v==="object"?JSON.stringify(v):v)}</td></tr>`).join("");}
 async function tick(){
@@ -147,7 +179,7 @@ async function tick(){
  }catch(e){document.getElementById("status").textContent="离线（bridge 未运行？）";}
 }
 async function act(action,id){
-  await fetch(API+"/v2/devices/"+action,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:id})});
+  await fetch(API+"/v2/devices/"+action,{method:"POST",headers:headers(),body:JSON.stringify({id:id})});
   tick();
 }
 tick();setInterval(tick,3000);
@@ -181,6 +213,7 @@ DEFAULT_CONFIG = {
     "memory": {"auto_index": True},
     "outbox": {"dir": "", "ttl": 3600, "max_items": 200, "secret": ""},
     "devices": {"mode": "off", "path": "", "salt": ""},
+    "control": {"token": "", "require_for_lan": True},
     "plans": {"db": ""},
     "audit": {"enabled": True, "db": "", "max_rows": 20000},
     "policy": {"mode": "audit", "deny": [], "allow": [], "deny_paths": [],
@@ -228,12 +261,23 @@ DEFAULT_CONFIG = {
     ],
 }
 
-_elected = _opt("--config") or next((a for a in ARGV if not a.startswith("--")), None)
+_elected = _opt("--config") or next(iter(_positional_args()), None)
 CONFIG_PATH = os.environ.get("BRIDGE_CONFIG") or _elected or os.path.join(BASE_DIR, "bridge.config.json")
 
 
 def write_default_config(path=None):
+    """Write a starter config - but never onto something that is clearly not a config.
+
+    4.0.1 guard: a mistyped CLI value (e.g. `--backup D:\\x.zip`) must not turn into a
+    config file written over the user's file.
+    """
     path = path or CONFIG_PATH
+    if os.path.splitext(path)[1].lower() not in ("", ".json"):
+        raise SystemExit("refusing to write a config to %r (looks like a %s, not a .json config)"
+                         % (path, os.path.splitext(path)[1] or "file"))
+    parent = os.path.dirname(os.path.abspath(path))
+    if not os.path.isdir(parent):
+        raise SystemExit("refusing to write a config into %r (no such folder)" % parent)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(DEFAULT_CONFIG, fh, ensure_ascii=False, indent=2)
     return path
@@ -379,6 +423,8 @@ MIGRATIONS = {
     "outbox.ttl": 3600,
     "outbox.max_items": 200,
     "devices.mode": "off",
+    "control.token": "",
+    "control.require_for_lan": True,
 }
 NEW_SERVERS = ("jobs", "memory", "plan", "audit", "send", "device")
 
@@ -477,6 +523,46 @@ def device_store():
 
 def devices_mode():
     return str((CFG.get("devices") or {}).get("mode") or "off").lower()
+
+
+def control_required():
+    """Control API protection is needed whenever the bridge is not loopback-only."""
+    cfg = CFG.get("control") or {}
+    if cfg.get("require_for_lan", True) is False:
+        return False
+    host = str((CFG.get("listen") or {}).get("host", "127.0.0.1")).lower()
+    return host not in ("127.0.0.1", "localhost", "::1", "")
+
+
+def control_token(create=True):
+    """A stable token for the control API (/v2/*, /dashboard) when exposed to the LAN."""
+    cfg = CFG.setdefault("control", {})
+    token = str(cfg.get("token") or "")
+    if token or not create:
+        return token
+    token = secrets.token_urlsafe(18)
+    cfg["token"] = token
+    try:                                   # keep the dashboard URL stable across restarts
+        with open(CONFIG_PATH, encoding="utf-8-sig") as fh:
+            raw = json.load(fh)
+        raw.setdefault("control", {})["token"] = token
+        with open(CONFIG_PATH, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(raw, fh, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+    return token
+
+
+def control_ok(handler):
+    """True when the caller may use the control API."""
+    if not control_required():
+        return True
+    expected = control_token()
+    given = handler.headers.get("X-Control-Token", "")
+    if not given:
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(handler.path).query)
+        given = (query.get("token") or [""])[0]
+    return bool(given) and hmac.compare_digest(str(given), str(expected))
 
 
 def _guard_tool(name, args):
@@ -1258,8 +1344,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def _dashboard(self):
         """A single self-contained page: servers, jobs, plans, audit, metrics (3.0)."""
+        if not control_ok(self):
+            hint = ("控制台需要令牌：请用启动日志里带 ?token=… 的地址打开"
+                    if "zh" != "en" else "dashboard needs a token")
+            body = ("<meta charset='utf-8'><body style='background:#0f1115;color:#e6e6e6;"
+                    "font:14px system-ui;padding:24px'>控制台需要令牌：请用启动日志里带 "
+                    "<code>?token=…</code> 的地址访问。<br><br>"
+                    "%s</body>" % hint).encode("utf-8")
+            self.send_response(401)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         html = DASHBOARD_HTML.replace("__VERSION__", APP_VERSION).replace(
-            "__BRIDGE__", "http://127.0.0.1:%s" % (CFG.get("listen") or {}).get("port", 8877))
+            "__BRIDGE__", "http://127.0.0.1:%s" % (CFG.get("listen") or {}).get("port", 8877)).replace(
+            "__TOKEN__", control_token() if control_required() else "")
         body = html.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1283,6 +1383,11 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlsplit(self.path)
         route = parsed.path[len("/v2/"):].strip("/")
         query = urllib.parse.parse_qs(parsed.query)
+        if route not in ("health", "") and not control_ok(self):
+            self._json({"error": {"message": "control API needs ?token=… (see the bridge log / config "
+                                             "control.token) because the bridge is reachable on the LAN",
+                                  "type": "control_token_required"}}, 401)
+            return
         store = job_store()
         if route in ("health", ""):
             self._json({"ok": True, "version": APP_VERSION, "uptime_s": int(time.time() - STARTED_AT),
@@ -1424,6 +1529,11 @@ class Handler(BaseHTTPRequestHandler):
     def _v2_post(self):
         parsed = urllib.parse.urlsplit(self.path)
         route = parsed.path[len("/v2/"):].strip("/")
+        if not control_ok(self):
+            self._json({"error": {"message": "control API needs the X-Control-Token header (or ?token=…) "
+                                             "because the bridge is reachable on the LAN",
+                                  "type": "control_token_required"}}, 401)
+            return
         body = self._read_body()
         if route == "outbox":
             path = body.get("path")
@@ -1823,6 +1933,15 @@ def cmd_backup(target=""):
     import zipfile
     stamp = time.strftime("%Y%m%d-%H%M%S")
     target = target or os.path.join(BASE_DIR, "mcp-hands-backup-%s.zip" % stamp)
+    if os.path.isdir(target):
+        print("refusing to write a backup over the folder %s" % target)
+        return 2
+    if os.path.isfile(target) and os.path.splitext(target)[1].lower() != ".zip":
+        print("refusing to overwrite %s (not a .zip)" % target)
+        return 2
+    if not os.path.isdir(os.path.dirname(os.path.abspath(target)) or "."):
+        print("refusing to write into %s (no such folder)" % os.path.dirname(target))
+        return 2
     files = []
     for name in ("bridge.config.json", "jobs.db", "plans.db", "audit.db", "devices.json"):
         path = os.path.join(BASE_DIR, name)
@@ -1854,33 +1973,44 @@ def cmd_restore(source):
     if not os.path.isfile(source):
         print("no such backup: %s" % source)
         return 1
-    restored = []
+    home = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    memory_dir = os.path.join(home, "mcp-hands")
+    allowed_roots = [os.path.realpath(BASE_DIR), os.path.realpath(memory_dir)]
+    restored, refused = [], []
     with zipfile.ZipFile(source) as zf:
         for info in zf.infolist():
+            if info.is_dir():
+                continue
             name = os.path.basename(info.filename)
             if not name or name == "backup.json":
                 continue
-            if name not in ("bridge.config.json", "jobs.db", "plans.db", "audit.db",
-                            "devices.json", "memory.db") and not info.filename.startswith("outbox/"):
-                continue
             if info.filename.startswith("outbox/"):
                 target = os.path.join(BASE_DIR, info.filename)
-                os.makedirs(os.path.dirname(target), exist_ok=True)
             elif name == "memory.db":
-                target = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
-                                      "mcp-hands", name)
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-            else:
+                target = os.path.join(memory_dir, name)
+            elif name in ("bridge.config.json", "jobs.db", "plans.db", "audit.db", "devices.json"):
                 target = os.path.join(BASE_DIR, name)
-            if os.path.isfile(target):
+            else:
+                refused.append(info.filename)
+                continue
+            # zip-slip guard: the resolved target must stay inside one of the two roots
+            real = os.path.realpath(target)
+            if not any(real == root or real.startswith(root + os.sep) for root in allowed_roots):
+                refused.append(info.filename)
+                continue
+            os.makedirs(os.path.dirname(real) or ".", exist_ok=True)
+            if os.path.isfile(real):
                 try:
-                    os.replace(target, target + ".before-restore")
+                    os.replace(real, real + ".before-restore")
                 except OSError:
                     pass
-            with zf.open(info) as src, open(target, "wb") as dst:
+            with zf.open(info) as src, open(real, "wb") as dst:
                 dst.write(src.read())
             restored.append(name)
-    print("restored %d file(s): %s" % (len(restored), ", ".join(sorted(set(restored)))))
+    print("restored %d file(s): %s" % (len(restored), ", ".join(sorted(set(restored))) or "-"))
+    if refused:
+        print("refused %d unsafe entry/entries (outside the install): %s"
+              % (len(refused), ", ".join(refused[:5])))
     print("note=restart the service so the restored config and databases are picked up")
     return 0
 
@@ -1961,6 +2091,12 @@ def main():
     log("tools    : %d from %d MCP servers" % (len(hub.specs), len(hub.servers)))
     log("jobs     : %s worker(s), queued=%d" % (runner.workers, job_store().stats()["by_status"].get("pending", 0)))
     log("config   : %s" % CONFIG_PATH)
+    dashboard_host = host if host not in ("0.0.0.0", "::", "") else lan_ip()
+    if control_required():
+        log("console  : http://%s:%d/dashboard?token=%s" % (dashboard_host, port, control_token()))
+        log("note     : the bridge is reachable on the LAN, so /v2 and /dashboard need that token")
+    else:
+        log("console  : http://127.0.0.1:%d/dashboard" % port)
     log("=" * 62)
     srv = ThreadingHTTPServer((host, port), Handler)
     srv.daemon_threads = True
