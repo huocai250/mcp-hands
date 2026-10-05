@@ -31,6 +31,27 @@
   "memory": {
     "auto_index": true
   },
+  "plans": {
+    "db": ""
+  },
+  "audit": {
+    "enabled": true,
+    "db": "",
+    "max_rows": 20000
+  },
+  "policy": {
+    "mode": "audit",
+    "deny": [],
+    "allow": [],
+    "deny_paths": [],
+    "max_calls_per_minute": 0,
+    "exempt": ["audit_*", "policy_*", "jobs_*", "plan_*"]
+  },
+  "log": {
+    "format": "text",
+    "max_mb": 8
+  },
+  "profiles": {},
   "proxy": {
     "enabled": true,
     "listen": { "host": "0.0.0.0", "port": 8890 },
@@ -85,6 +106,8 @@
     { "name": "netcheck", "enabled": true },
     { "name": "office2", "enabled": true },
     { "name": "jobs", "enabled": true },
-    { "name": "memory", "enabled": true }
+    { "name": "memory", "enabled": true },
+    { "name": "plan", "enabled": true },
+    { "name": "audit", "enabled": true }
   ]
 }

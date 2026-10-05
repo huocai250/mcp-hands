@@ -64,12 +64,12 @@ def upstream_base():
 RETRY_STATUS = (408, 409, 425, 429, 500, 502, 503, 504)
 
 
-def upstream_post(path, payload, auth, timeout=240, attempts=3):
+def upstream_post(path, payload, auth, timeout=240, attempts=3, base=None, key=None):
     """POST to the upstream, retrying transient failures with a short backoff."""
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    url = upstream_base() + path
+    url = (base or upstream_base()).rstrip("/") + path
     headers = {"Content-Type": "application/json",
-               "Authorization": auth or ("Bearer " + proxy_cfg().get("upstream_api_key", ""))}
+               "Authorization": auth or ("Bearer " + (key or proxy_cfg().get("upstream_api_key", "")))}
     last = None
     for attempt in range(1, max(1, int(attempts)) + 1):
         req = urllib.request.Request(url, data=data, method="POST", headers=headers)
@@ -339,6 +339,68 @@ def note_usage(usage):
     metrics["completion_tokens_total"] = metrics.get("completion_tokens_total", 0) + int(usage.get("completion_tokens") or 0)
 
 
+def resolve_profile(body=None, auth="", header=""):
+    """3.0 multi-persona: pick a profile by header, model name or key.
+
+    Returns (name, config). With no profiles configured this is ("", {}) and nothing
+    about the old behaviour changes.
+    """
+    profiles = bridge.CFG.get("profiles") or {}
+    if not profiles:
+        return "", {}
+    wanted = str(header or "").strip()
+    if wanted and wanted in profiles:
+        return wanted, dict(profiles[wanted] or {})
+    model = str((body or {}).get("model") or "")
+    token = (auth or "").replace("Bearer ", "").strip()
+    for name, cfg in profiles.items():
+        cfg = cfg or {}
+        if cfg.get("model") and cfg["model"] == model:
+            return name, dict(cfg)
+        if cfg.get("api_key") and token and cfg["api_key"] == token:
+            return name, dict(cfg)
+    default = bridge.CFG.get("profile_default")
+    if isinstance(default, str) and default in profiles:
+        return default, dict(profiles[default] or {})
+    if default in profiles:
+        return default, dict(profiles[default] or {})
+    name = next(iter(profiles))
+    return name, dict(profiles[name] or {})
+
+
+def profile_allows(config, tool_name):
+    """Per-profile tool rules: allow list, then deny list, both glob-ish."""
+    import fnmatch
+    allow = [str(p) for p in (config.get("tools") or config.get("allow") or [])]
+    deny = [str(p) for p in (config.get("deny") or [])]
+    if allow and not any(fnmatch.fnmatch(tool_name, pattern) for pattern in allow):
+        return False
+    return not any(fnmatch.fnmatch(tool_name, pattern) for pattern in deny)
+
+
+def plan_hint(limit=2):
+    """The next open step of the active plans, so long tasks survive across turns."""
+    port = (bridge.CFG.get("listen") or {}).get("port", 8877)
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%s/v2/plans?status=active&limit=5" % port, timeout=5) as resp:
+            plans = (json.loads(resp.read().decode("utf-8", "replace") or "{}").get("plans") or [])
+    except Exception:  # noqa: BLE001
+        return ""
+    lines = []
+    for plan in plans[:limit]:
+        step = next((s for s in plan.get("steps") or [] if s.get("status") in ("todo", "doing")), None)
+        if not step:
+            continue
+        lines.append("· %s（%s，%s/%s）下一步：%s%s" % (
+            plan.get("id"), plan.get("title") or plan.get("goal", "")[:40],
+            plan.get("done"), plan.get("total"), step.get("text"),
+            ("（工具 %s）" % step["tool"]) if step.get("tool") else ""))
+    if not lines:
+        return ""
+    return ("【计划】你手上还有没做完的计划，请接着做下一步（做完调用 plan_done 并把真实工具输出作为 evidence，"
+            "没有证据不算完成；计划全做完再向用户汇总）：\n" + "\n".join(lines))
+
+
 def native_tools(hub):
     tools = []
     for spec in hub.specs:
@@ -376,14 +438,16 @@ def vision_args(name, args, auth):
     return args
 
 
-def run_tool_loop(body, auth, on_event=None):
+def run_tool_loop(body, auth, on_event=None, profile_name="", profile_cfg=None):
     """Returns (message, steps, usage). message is an OpenAI assistant message dict.
 
     on_event(tool_name, is_error) is called after every tool execution so the caller
     can push a live progress line to the client instead of staying silent for minutes.
+    profile_name/profile_cfg (3.0) narrow the tool list and pick the upstream per identity.
     """
     hub = bridge.start_hub()
-    model = body.get("model") or "deepseek-chat"
+    profile_cfg = dict(profile_cfg or {})
+    model = profile_cfg.get("model") or body.get("model") or "deepseek-chat"
     raw_messages = list(body.get("messages") or [])
     messages = sanitize(raw_messages)
     if len(messages) != len(raw_messages):
@@ -403,6 +467,14 @@ def run_tool_loop(body, auth, on_event=None):
             log("  delivered %d background job result(s) into this turn" % len(finished_jobs))
         messages.insert(0, {"role": "system", "content": hint})
     tools = native_tools(hub)
+    if profile_cfg:
+        keep = [t for t in tools if profile_allows(profile_cfg, t["function"]["name"])]
+        if len(keep) != len(tools):
+            log("  profile %r exposes %d/%d tools" % (profile_name, len(keep), len(tools)))
+        tools = keep
+        plan_block = plan_hint()
+        if plan_block:
+            messages.insert(0, {"role": "system", "content": plan_block})
     extra = {k: v for k, v in body.items() if k in ("temperature", "top_p", "max_tokens", "frequency_penalty", "presence_penalty", "response_format")}
     steps = []
     message = {}
@@ -428,7 +500,8 @@ def run_tool_loop(body, auth, on_event=None):
             payload = {"model": model, "messages": messages, "stream": False,
                        "tools": tools, "tool_choice": "auto"}
         payload.update(extra)
-        data = upstream_post("/chat/completions", payload, auth)
+        data = upstream_post("/chat/completions", payload, auth,
+                             base=profile_cfg.get("upstream_base"), key=profile_cfg.get("api_key"))
         note_usage(data.get("usage"))
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
@@ -470,7 +543,8 @@ def run_tool_loop(body, auth, on_event=None):
             output, is_error = hub.call(name, args)
             log("  tool -> %s %s" % (name, json.dumps(mask_args(args), ensure_ascii=False)[:200]))
             log("  tool <- %s %s (%d chars)" % (name, "ERROR" if is_error else "ok", len(output)))
-            steps.append({"tool": name, "arguments": args, "error": is_error, "output": output[:4000]})
+            steps.append({"tool": name, "arguments": args, "error": is_error, "output": output[:4000],
+                          "profile": profile_name})
             if on_event:
                 on_event(name, is_error)
             messages.append({"role": "tool", "tool_call_id": call.get("id") or name,
@@ -533,7 +607,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         threading.Thread(target=beat, daemon=True, name="sse-heartbeat").start()
         return stop
 
-    def _run_loop_streaming(self, body, auth, model):
+    def _run_loop_streaming(self, body, auth, model, profile_name="", profile_cfg=None):
         """Open the SSE stream *before* the tool loop, so the app never sits in silence."""
         self._sse_start()
         self._sse_open = True
@@ -572,7 +646,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 pass
 
         try:
-            result = run_tool_loop(body, auth, on_event=on_event)
+            result = run_tool_loop(body, auth, on_event=on_event, profile_name=profile_name,
+                                   profile_cfg=profile_cfg)
         finally:
             if stop:
                 stop.set()
@@ -688,14 +763,22 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
         log("tool request: model=%s messages=%d stream=%s" % (model, len(body.get("messages") or []), body.get("stream")))
         bridge.METRICS["requests_total"] = bridge.METRICS.get("requests_total", 0) + 1
+        # 3.0: which identity is asking decides the tool set and the upstream.
+        profile_name, profile_cfg = resolve_profile(body, auth, self.headers.get("X-Profile", ""))
+        bridge.set_active_profile(profile_name)
+        if profile_name:
+            log("  profile=%s (tools=%s upstream=%s model=%s)"
+                % (profile_name, len(profile_cfg.get("tools") or []) or "all",
+                   profile_cfg.get("upstream_base") or "default", profile_cfg.get("model") or model))
         token = remember_key(auth)
         if token:
             log("  remembered the app's key (%s...) for vision calls" % token[:6])
         try:
             self._write_lock = threading.Lock()
             self._sse_open = False
-            message, steps, usage = self._run_loop_streaming(body, auth, model) if body.get("stream") \
-                else run_tool_loop(body, auth)
+            message, steps, usage = self._run_loop_streaming(body, auth, model, profile_name, profile_cfg) \
+                if body.get("stream") \
+                else run_tool_loop(body, auth, profile_name=profile_name, profile_cfg=profile_cfg)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")
             log("  upstream HTTP %s: %s" % (exc.code, detail[:300]))

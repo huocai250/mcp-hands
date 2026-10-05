@@ -75,7 +75,7 @@ def hide_console():
 
 
 CLI_FLAGS = ("--tools", "--self-test", "--doctor", "--version", "--init", "--jobs",
-             "--jobs-run", "--migrate")
+             "--jobs-run", "--migrate", "--audit", "--plans")
 
 
 def main():
@@ -212,6 +212,7 @@ class Console(Tk):
                           ("测试对话", self.test_chat),
                           ("测试视觉", self.test_vision),
                           ("后台任务", self.show_jobs),
+                          ("网页控制台", self.open_dashboard),
                           ("关于", self.show_about)):
             ttk.Button(bar, text=text, command=cmd).pack(side=LEFT, padx=(0, 6))
         ttk.Button(bar, text="清空日志", command=self.clear_log).pack(side=RIGHT)
@@ -328,6 +329,12 @@ class Console(Tk):
         version.bind("<Button-1>", lambda _e: webbrowser.open(bridge.APP_URL))
         self._load_config_into_ui()
         self.after(300, self._init_sash)
+
+    def open_dashboard(self):
+        """Open the 3.0 web console (servers, jobs, plans, audit) in the browser."""
+        port = self.fields["port"].get().strip() or "8877"
+        webbrowser.open("http://127.0.0.1:%s/dashboard" % port)
+        self.say("已在浏览器打开网页控制台：http://127.0.0.1:%s/dashboard（服务未运行时页面会显示离线）" % port)
 
     def show_jobs(self):
         """后台任务面板（2.0）：看队列和结果。"""

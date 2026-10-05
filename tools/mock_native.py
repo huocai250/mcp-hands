@@ -120,7 +120,9 @@ class Handler(BaseHTTPRequestHandler):
                 sum(1 for m in messages if m.get("role") == "system"))}
         elif "ECHO_SYS" in user_text:
             system = next((m.get("content") or "" for m in messages if m.get("role") == "system"), "")
-            message = {"role": "assistant", "content": "SYS>>> %s" % system}
+            message = {"role": "assistant",
+                       "content": "SYS>>> [offered=%d]%s\n---\n%s"
+                                  % (len(offered), ",".join(sorted(offered)[:400]), system)}
         elif "DSMLONLY:" in user_text:
             # Reproduce DeepSeek emitting tool markup as *text* (no native tool_calls),
             # the exact shape seen in the phone app.

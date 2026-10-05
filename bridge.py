@@ -33,11 +33,11 @@ sys.path.insert(0, HERE)
 
 # ------------------------------------------------------------------ branding
 APP_NAME = "mcp-hands"
-APP_VERSION = "2.0.0"
+APP_VERSION = "3.0.0"
 APP_AUTHOR = "huocai250"
 APP_URL = "https://github.com/huocai250/mcp-hands"
 APP_LICENSE = "MIT"
-APP_TAGLINE = "把手机里的人设接上电脑的 353 个工具：能看图、能读屏幕、能自己干长活"
+APP_TAGLINE = "把手机里的人设接上电脑的 363 个工具：能看能读、能干长活、能被审计"
 
 
 def version_line():
@@ -63,8 +63,10 @@ if "--mcp-server" in ARGV:
     run_server(ARGV[ARGV.index("--mcp-server") + 1])
     raise SystemExit(0)
 
+from audit import AuditStore, Policy  # noqa: E402
 from jobs import JobRunner, JobStore  # noqa: E402
 from mcp_client import ToolHub  # noqa: E402
+from plans import PlanStore  # noqa: E402
 
 
 def _opt(name, default=None):
@@ -78,6 +80,61 @@ def _opt(name, default=None):
 LOG_LOCK = threading.Lock()
 LOG_FILE = os.path.join(BASE_DIR, "bridge.log")
 LOG_SINKS = []
+
+# The 3.0 dashboard: one self-contained page, no external assets, no build step.
+DASHBOARD_HTML = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>mcp-hands __VERSION__ · 控制台</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+ body{margin:0;background:#0f1115;color:#e6e6e6;font:14px/1.6 "Segoe UI",system-ui,sans-serif}
+ header{padding:16px 20px;border-bottom:1px solid #23262e;display:flex;gap:14px;align-items:baseline}
+ h1{font-size:17px;margin:0;font-weight:600}
+ .dim{color:#8b93a1;font-size:12px}
+ main{padding:16px 20px;display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(330px,1fr))}
+ section{background:#151922;border:1px solid #23262e;border-radius:10px;padding:12px 14px}
+ h2{font-size:13px;margin:0 0 8px;color:#9fb3d1;font-weight:600;letter-spacing:.04em}
+ table{width:100%;border-collapse:collapse;font-size:12.5px}
+ td,th{text-align:left;padding:3px 6px;border-bottom:1px solid #1d2129;vertical-align:top}
+ th{color:#8b93a1;font-weight:500}
+ .ok{color:#5ad07a}.bad{color:#ff7a7a}.todo{color:#8b93a1}.doing{color:#ffcf6b}
+ pre{margin:0;white-space:pre-wrap;word-break:break-all;font-size:12px;color:#c9d1d9}
+</style></head><body>
+<header><h1>mcp-hands __VERSION__</h1><span class="dim" id="status">连接中…</span>
+<span class="dim">bridge __BRIDGE__</span></header>
+<main>
+ <section><h2>概览</h2><div id="overview"></div></section>
+ <section><h2>后台任务</h2><div id="jobs"></div></section>
+ <section><h2>计划</h2><div id="plans"></div></section>
+ <section><h2>最近工具调用（审计）</h2><div id="audit"></div></section>
+</main>
+<script>
+const API="__BRIDGE__";
+async function j(path){const r=await fetch(API+path);return r.ok?r.json():{error:r.status};}
+function esc(s){return String(s==null?"":s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+function kv(o){return Object.entries(o).map(([k,v])=>`<tr><th>${esc(k)}</th><td>${esc(typeof v==="object"?JSON.stringify(v):v)}</td></tr>`).join("");}
+async function tick(){
+ try{
+  const h=await j("/v2/health");
+  document.getElementById("status").textContent="在线 · 运行 "+(h.uptime_s||0)+"s";
+  document.getElementById("overview").innerHTML="<table>"+kv({
+    "版本":h.version,"工具数":h.metrics&&h.metrics.tool_calls_total!==undefined?h.servers:h.servers,
+    "服务数":h.servers,"任务":h.jobs&&h.jobs.by_status,"计划":h.plans&&h.plans.by_status,
+    "审计总条数":h.audit&&h.audit.total,"策略模式":h.policy&&h.policy.mode,
+    "请求 (prompt/completion tokens)":h.metrics?h.metrics.prompt_tokens_total+"/"+h.metrics.completion_tokens_total:"-"})+"</table>";
+  const jobs=await j("/v2/jobs?limit=8");
+  document.getElementById("jobs").innerHTML="<table><tr><th>id</th><th>状态</th><th>进度</th><th>标题</th></tr>"+
+    (jobs.jobs||[]).map(x=>`<tr><td>${esc(x.id)}</td><td class="${x.status==='done'?'ok':x.status==='failed'?'bad':''}">${esc(x.status)}</td><td>${x.progress}/${x.total}</td><td>${esc(x.title)}</td></tr>`).join("")+"</table>";
+  const plans=await j("/v2/plans?limit=8");
+  document.getElementById("plans").innerHTML="<table><tr><th>id</th><th>状态</th><th>进度</th><th>目标</th></tr>"+
+    (plans.plans||[]).map(p=>`<tr><td>${esc(p.id)}</td><td class="${p.status==='active'?'doing':'ok'}">${esc(p.status)}</td><td>${p.done}/${p.total}</td><td>${esc(p.goal)}</td></tr>`).join("")+"</table>";
+  const audit=await j("/v2/audit?limit=12");
+  document.getElementById("audit").innerHTML="<table><tr><th>时间</th><th>工具</th><th>结果</th><th>参数</th></tr>"+
+    (audit.calls||[]).map(c=>`<tr><td class="dim">${esc((c.when||"").slice(11))}</td><td>${esc(c.tool)}</td><td class="${c.ok?'ok':'bad'}">${c.ok?'ok':'失败 '+(c.ms||0)+'ms'}</td><td><pre>${esc(JSON.stringify(c.args)).slice(0,120)}</pre></td></tr>`).join("")+"</table>";
+ }catch(e){document.getElementById("status").textContent="离线（bridge 未运行？）";}
+}
+tick();setInterval(tick,3000);
+</script></body></html>"""
 
 
 def add_log_sink(fn):
@@ -105,6 +162,12 @@ DEFAULT_CONFIG = {
     },
     "jobs": {"enabled": True, "workers": 1, "notify": True, "db": ""},
     "memory": {"auto_index": True},
+    "plans": {"db": ""},
+    "audit": {"enabled": True, "db": "", "max_rows": 20000},
+    "policy": {"mode": "audit", "deny": [], "allow": [], "deny_paths": [],
+               "max_calls_per_minute": 0, "exempt": ["audit_*", "policy_*", "jobs_*", "plan_*"]},
+    "log": {"format": "text", "max_mb": 8},
+    "profiles": {},
     "servers": [
         {"name": "fs", "enabled": True, "env": {"MCP_FS_ROOTS": os.path.expanduser("~")}},
         {"name": "shell", "enabled": True},
@@ -139,6 +202,8 @@ DEFAULT_CONFIG = {
         {"name": "office2", "enabled": True},
         {"name": "jobs", "enabled": True},
         {"name": "memory", "enabled": True},
+        {"name": "plan", "enabled": True},
+        {"name": "audit", "enabled": True},
     ],
 }
 
@@ -153,16 +218,49 @@ def write_default_config(path=None):
     return path
 
 
+def _rotate_log():
+    """Keep the log small: bridge.log -> bridge.log.1 once it passes log.max_mb.
+
+    Uses globals() because log() can legitimately run while the config module-level
+    assignment is still in flight (a missing config logs a line).
+    """
+    cfg = globals().get("CFG") or {}
+    limit_mb = float((cfg.get("log") or {}).get("max_mb", 8) or 0)
+    if limit_mb <= 0:
+        return
+    try:
+        if os.path.getsize(LOG_FILE) < limit_mb * 1024 * 1024:
+            return
+        backup = LOG_FILE + ".1"
+        if os.path.exists(backup):
+            os.remove(backup)
+        os.replace(LOG_FILE, backup)
+    except OSError:
+        pass
+
+
 def log(msg):
-    line = "[%s] %s" % (time.strftime("%H:%M:%S"), msg)
+    """Text (default) or one-JSON-object-per-line output, plus the log file."""
+    fmt = str((globals().get("CFG") or {}).get("log", {}).get("format", "text") or "text").lower()
+    stamp = time.strftime("%H:%M:%S")
+    line = "[%s] %s" % (stamp, msg)
     with LOG_LOCK:
         try:
             print(line, flush=True)
         except Exception:  # noqa: BLE001 - windowed builds may have no stdout
             pass
         try:
-            with open(LOG_FILE, "a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
+            if fmt == "json":
+                record = json.dumps({"ts": time.time(), "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                     "level": "error" if "ERROR" in str(msg).upper() else "info",
+                                     "message": msg, "version": APP_VERSION}, ensure_ascii=False)
+                _rotate_log()
+                with open(LOG_FILE, "a", encoding="utf-8") as fh:
+                    fh.write(record + "\n")
+            else:
+                _rotate_log()
+                with open(LOG_FILE, "a", encoding="utf-8") as fh:
+                    fh.write(line + "\n")
         except OSError:
             pass
     for sink in list(LOG_SINKS):
@@ -199,6 +297,22 @@ def load_config():
     jobs.setdefault("workers", 1)
     jobs.setdefault("notify", True)
     cfg.setdefault("memory", {}).setdefault("auto_index", True)
+    cfg.setdefault("plans", {}).setdefault("db", "")
+    audit = cfg.setdefault("audit", {})
+    audit.setdefault("enabled", True)
+    audit.setdefault("db", "")
+    audit.setdefault("max_rows", 20000)
+    pol = cfg.setdefault("policy", {})
+    pol.setdefault("mode", "audit")
+    pol.setdefault("deny", [])
+    pol.setdefault("allow", [])
+    pol.setdefault("deny_paths", [])
+    pol.setdefault("max_calls_per_minute", 0)
+    pol.setdefault("exempt", ["audit_*", "policy_*", "jobs_*", "plan_*"])
+    log_cfg = cfg.setdefault("log", {})
+    log_cfg.setdefault("format", "text")
+    log_cfg.setdefault("max_mb", 8)
+    cfg.setdefault("profiles", {})
     return cfg
 
 
@@ -226,8 +340,19 @@ MIGRATIONS = {
     "jobs.notify": True,
     "jobs.db": "",
     "memory.auto_index": True,
+    "plans.db": "",
+    "audit.enabled": True,
+    "audit.db": "",
+    "audit.max_rows": 20000,
+    "policy.mode": "audit",
+    "policy.deny": [],
+    "policy.allow": [],
+    "policy.deny_paths": [],
+    "policy.max_calls_per_minute": 0,
+    "log.format": "text",
+    "log.max_mb": 8,
 }
-NEW_SERVERS = ("jobs", "memory")
+NEW_SERVERS = ("jobs", "memory", "plan", "audit")
 
 
 def migrate_config(path=None):
@@ -264,6 +389,77 @@ METRICS = {"requests_total": 0, "tool_calls_total": 0, "prompt_tokens_total": 0,
            "completion_tokens_total": 0, "errors_total": 0}
 _JOBS = None
 _RUNNER = None
+_AUDIT = None
+_POLICY = None
+_PLANS = None
+
+
+def audit_store():
+    """3.0: every tool call can be recorded; answers 'what did it actually do'."""
+    global _AUDIT
+    if _AUDIT is None:
+        cfg = CFG.get("audit") or {}
+        _AUDIT = AuditStore(cfg.get("db") or os.path.join(BASE_DIR, "audit.db"),
+                            max_rows=int(cfg.get("max_rows", 20000) or 20000))
+    return _AUDIT
+
+
+def policy():
+    global _POLICY
+    if _POLICY is None:
+        _POLICY = Policy(CFG.get("policy") or {})
+    return _POLICY
+
+
+def plan_store():
+    """3.0: goals split into steps, stored so they survive turns and restarts."""
+    global _PLANS
+    if _PLANS is None:
+        cfg = CFG.get("plans") or {}
+        _PLANS = PlanStore(cfg.get("db") or os.path.join(BASE_DIR, "plans.db"))
+    return _PLANS
+
+
+def _guard_tool(name, args):
+    return policy().check(name, args)
+
+
+_ACTIVE = threading.local()
+
+
+def set_active_profile(name):
+    """Which identity this thread is serving, used to tag audit rows."""
+    _ACTIVE.profile = str(name or "")
+
+
+def active_profile():
+    return getattr(_ACTIVE, "profile", "")
+
+
+def _audit_tool(record, profile="", source="chat"):
+    cfg = CFG.get("audit") or {}
+    if cfg.get("enabled", True) is False:
+        return
+    record = dict(record)
+    record["profile"] = profile or record.get("profile") or active_profile()
+    record["source"] = source
+    audit_store().record(**record)
+
+
+def profile_names():
+    return sorted((CFG.get("profiles") or {}).keys())
+
+
+def profile_config(name):
+    """One named profile: its own upstream/model/tool rules (3.0 multi-persona)."""
+    profiles = CFG.get("profiles") or {}
+    if not profiles:
+        return {}
+    key = str(name or "").strip()
+    if key and key in profiles:
+        return dict(profiles[key] or {})
+    default = CFG.get("profile_default") or next(iter(profiles.values()), {})
+    return dict(default or {})
 
 
 def job_store():
@@ -348,7 +544,9 @@ def start_hub():
             log("server discovery skipped: %s" % exc)
         HUB = ToolHub(configured, cwd=BASE_DIR, log=lambda m: log("  " + m),
                       entry=None if FROZEN else os.path.join(HERE, "bridge.py"),
-                      extra_env=extra_env)
+                      extra_env=extra_env, guard=_guard_tool, audit=_audit_tool)
+        pol = policy().describe()
+        log("policy   : mode=%s deny=%s allow=%s" % (pol["mode"], pol["deny"] or "-", pol["allow"] or "all"))
     return HUB
 
 
@@ -402,6 +600,10 @@ def run_command(name):
         return cmd_jobs(int(_opt("--limit") or 20))
     if name in ("jobs-run", "--jobs-run"):
         return cmd_jobs_run(_opt("--jobs-run") or "")
+    if name in ("audit", "--audit"):
+        return cmd_audit(int(_opt("--limit") or 30))
+    if name in ("plans", "--plans"):
+        return cmd_plans(int(_opt("--limit") or 20))
     return 2
 
 # ------------------------------------------------------------- tool protocol
@@ -883,6 +1085,17 @@ class Handler(BaseHTTPRequestHandler):
         data = text.encode("utf-8")
         self.wfile.write(("%X\r\n" % len(data)).encode("ascii") + data + b"\r\n")
 
+    def _dashboard(self):
+        """A single self-contained page: servers, jobs, plans, audit, metrics (3.0)."""
+        html = DASHBOARD_HTML.replace("__VERSION__", APP_VERSION).replace(
+            "__BRIDGE__", "http://127.0.0.1:%s" % (CFG.get("listen") or {}).get("port", 8877))
+        body = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _sse_end(self):
         self.wfile.write(b"0\r\n\r\n")
 
@@ -902,8 +1115,43 @@ class Handler(BaseHTTPRequestHandler):
         store = job_store()
         if route in ("health", ""):
             self._json({"ok": True, "version": APP_VERSION, "uptime_s": int(time.time() - STARTED_AT),
-                        "jobs": store.stats(), "metrics": METRICS,
+                        "jobs": store.stats(), "plans": plan_store().stats(),
+                        "audit": audit_store().stats(), "metrics": METRICS,
+                        "policy": policy().describe(),
+                        "profiles": profile_names(),
                         "servers": len(HUB.specs) if HUB else 0})
+            return
+        if route == "profiles":
+            self._json({"profiles": [{"name": name, "config": profile_config(name)} for name in profile_names()]})
+            return
+        if route == "policy":
+            self._json({"policy": policy().describe()})
+            return
+        if route == "audit":
+            rows = audit_store().tail(limit=int(query.get("limit", ["50"])[0]),
+                                      tool=query.get("tool", [""])[0],
+                                      profile=query.get("profile", [""])[0],
+                                      only_errors=str(query.get("only_errors", ["0"])[0]) in ("1", "true", "yes"))
+            self._json({"calls": rows, "count": len(rows), "stats": audit_store().stats()})
+            return
+        if route == "audit/stats":
+            self._json({"stats": audit_store().stats(since_seconds=float(query.get("hours", ["24"])[0]) * 3600)})
+            return
+        if route == "plans":
+            plans = plan_store().list(status=query.get("status", [""])[0] or None,
+                                      limit=int(query.get("limit", ["20"])[0]),
+                                      profile=query.get("profile", [""])[0])
+            self._json({"plans": plans, "stats": plan_store().stats()})
+            return
+        if route == "plans/stats":
+            self._json({"stats": plan_store().stats()})
+            return
+        if route.startswith("plans/"):
+            plan = plan_store().get(route.split("/", 1)[1])
+            if not plan:
+                self._json({"error": {"message": "no such plan"}}, 404)
+                return
+            self._json({"plan": plan})
             return
         if route == "jobs":
             if str(query.get("pending", ["0"])[0]) in ("1", "true", "yes"):
@@ -934,6 +1182,40 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlsplit(self.path)
         route = parsed.path[len("/v2/"):].strip("/")
         body = self._read_body()
+        if route == "plans":
+            try:
+                plan = plan_store().create(goal=body.get("goal", ""), steps=body.get("steps"),
+                                           title=body.get("title", ""), profile=body.get("profile", ""))
+            except ValueError as exc:
+                self._json({"error": {"message": str(exc)}}, 400)
+                return
+            self._json({"plan": plan}, 201)
+            return
+        if route.startswith("plans/"):
+            parts = [p for p in route.split("/") if p]
+            plan_id = parts[1] if len(parts) > 1 else ""
+            action = parts[2] if len(parts) > 2 else ""
+            extra = parts[3] if len(parts) > 3 else ""
+            plan = None
+            if action == "step" and extra == "add":
+                plan = plan_store().add_step(plan_id, body.get("text", ""), body.get("tool", ""),
+                                             args=body.get("args"))
+            elif action == "step":
+                plan = plan_store().mark_step(plan_id, body.get("step", ""), body.get("status", "done"),
+                                              evidence=body.get("evidence", ""), error=body.get("error", ""))
+            elif action == "add":
+                plan = plan_store().add_step(plan_id, body.get("text", ""), body.get("tool", ""),
+                                             args=body.get("args"))
+            elif action == "cancel":
+                plan = plan_store().cancel(plan_id)
+            else:
+                self._json({"error": {"message": "unknown plan action"}}, 404)
+                return
+            if not plan:
+                self._json({"error": {"message": "no such plan or step"}}, 404)
+                return
+            self._json({"plan": plan})
+            return
         if route == "jobs":
             jobs_cfg = CFG.get("jobs") or {}
             if jobs_cfg.get("enabled", True) is False:
@@ -961,6 +1243,9 @@ class Handler(BaseHTTPRequestHandler):
 
     # -------------------------------------------------------------------- routes
     def do_GET(self):
+        if self.path.startswith("/dashboard"):
+            self._dashboard()
+            return
         if self.path.startswith("/v2/"):
             self._v2_get()
             return
@@ -1167,6 +1452,27 @@ def cmd_jobs_run(job_id):
     return 0 if job["status"] == "done" else 1
 
 
+def cmd_audit(limit=30):
+    """--audit: what actually ran, with arguments and durations."""
+    rows = audit_store().tail(limit=int(limit))
+    stats = audit_store().stats()
+    print("audit: total=%d window=%ds calls=%d failures=%d db=%s"
+          % (stats["total"], stats["since_seconds"], stats["window_calls"], stats["window_failures"],
+             audit_store().path))
+    for row in rows:
+        print("  %s [%s] %s %sms %s" % (row["when"], "ok" if row["ok"] else "FAILED", row["tool"], row["ms"],
+                                        json.dumps(row["args"], ensure_ascii=False)[:110]))
+    return 0
+
+
+def cmd_plans(limit=20):
+    store = plan_store()
+    print("plans: %s db=%s" % (store.stats(), store.path))
+    for plan in store.list(limit=int(limit)):
+        print("  %s [%-9s] %d/%d %s" % (plan["id"], plan["status"], plan["done"], plan["total"], plan["title"][:50]))
+    return 0
+
+
 def main():
     if "--version" in ARGV or "-V" in ARGV:
         raise SystemExit(cmd_version())
@@ -1183,6 +1489,10 @@ def main():
         raise SystemExit(cmd_jobs(int(_opt("--limit") or 20)))
     if "--jobs-run" in ARGV:
         raise SystemExit(cmd_jobs_run(_opt("--jobs-run")))
+    if "--audit" in ARGV:
+        raise SystemExit(cmd_audit(int(_opt("--limit") or 30)))
+    if "--plans" in ARGV:
+        raise SystemExit(cmd_plans(int(_opt("--limit") or 20)))
     if "--init" in ARGV:
         print("config written: %s" % write_default_config(_opt("--config")))
         raise SystemExit(0)

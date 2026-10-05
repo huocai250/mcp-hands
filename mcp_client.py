@@ -143,16 +143,21 @@ class McpServer:
 class ToolHub:
     """Owns every MCP server and exposes a flat, model-friendly tool namespace."""
 
-    def __init__(self, server_configs, cwd=None, log=print, entry=None, extra_env=None):
+    def __init__(self, server_configs, cwd=None, log=print, entry=None, extra_env=None,
+                 guard=None, audit=None):
         """entry: path to bridge.py so children can re-enter as `--mcp-server NAME`;
         None when frozen (sys.executable is the bundle itself).
-        extra_env: variables handed to every child (e.g. MCP_VISION_* from the config)."""
+        extra_env: variables handed to every child (e.g. MCP_VISION_* from the config).
+        guard(name, args) -> (allowed, reason): policy check before every call.
+        audit(record): called after every call with tool/args/ok/error/ms/chars."""
         self.log = log
         self.servers = []
         self.aliases = {}
         self.specs = []
         self.entry = entry
         self.extra_env = {k: str(v) for k, v in (extra_env or {}).items() if v not in (None, "")}
+        self.guard = guard
+        self.audit = audit
         self._start_all(server_configs, cwd)
 
     def _argv_for(self, raw, cwd):
@@ -221,6 +226,12 @@ class ToolHub:
         target = self.resolve(name)
         if not target:
             return "unknown tool '%s'. available: %s" % (name, ", ".join(s["name"] for s in self.specs)), True
+        # 3.0: one choke point for policy decisions and the audit trail.
+        if self.guard is not None:
+            allowed, reason = self.guard(name, arguments)
+            if not allowed:
+                self._audit(name, arguments, False, "blocked: %s" % reason, 0.0, 0)
+                return "blocked by policy: %s" % reason, True
         server, tool = target
         # Models sometimes invent extra fields; a stray keyword would otherwise turn a
         # perfectly good call into TypeError. Drop anything the schema does not declare.
@@ -231,11 +242,27 @@ class ToolHub:
             if dropped:
                 arguments = {k: v for k, v in arguments.items() if k in props}
                 self.log("tool '%s': ignored undeclared argument(s) %s" % (name, ", ".join(dropped)))
+        started = time.perf_counter()
         try:
             text, is_error = server.call_tool(tool, arguments)
         except McpError as exc:
+            self._audit(name, arguments, False, str(exc), time.perf_counter() - started, 0)
             return str(exc), True
+        except Exception as exc:  # noqa: BLE001 - a broken server must not kill the caller
+            self._audit(name, arguments, False, str(exc), time.perf_counter() - started, 0)
+            return "%s: %s" % (type(exc).__name__, exc), True
+        self._audit(name, arguments, not is_error, "" if not is_error else text, time.perf_counter() - started,
+                    len(text or ""))
         return text, is_error
+
+    def _audit(self, name, arguments, ok, error, seconds, chars):
+        if self.audit is None:
+            return
+        try:
+            self.audit({"tool": name, "args": arguments, "ok": ok, "error": error,
+                        "ms": int(seconds * 1000), "chars": int(chars)})
+        except Exception:  # noqa: BLE001 - auditing must never break a call
+            pass
 
     def stop(self):
         for server in self.servers:

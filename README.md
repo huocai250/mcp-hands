@@ -1,6 +1,6 @@
 # mcp-hands
 
-> **给她一双手**：把**手机 App 里的人设**接上**电脑上的 353 个工具**（33 个自研 MCP server），**能看图、能读屏幕、能自己干长活**，并打包成带图形控制台的单个 exe。
+> **给她一双手**：把**手机 App 里的人设**接上**电脑上的 363 个工具**（35 个自研 MCP server），**能看图、能读屏幕、能自己干长活、还留得下审计**，并打包成带图形控制台与网页控制台的单个 exe。
 
 作者 **huocai250** · 仓库 <https://github.com/huocai250/mcp-hands> · [MIT License](LICENSE) · Windows x64
 
@@ -22,13 +22,14 @@
 ## 特性
 
 * **两种接入方式**：A) 电脑端任意 OpenAI 兼容客户端经桥接使用人设；B) 让手机 App 自己的聊天直接带上原生工具调用（推荐，聊天记录里不会出现工具痕迹）。
-* **353 个工具 / 33 个 server**：文件、命令、网页、Office、图片、PDF、二维码、压缩包、SQLite、桌面自动化、语音、系统监控、网络与安全、开发工具、文本/数据转换、备份、HTTP 文件共享、计划任务、软件安装、注册表、网络高级设置、**视觉识别（看屏幕/看图/OCR）**、**后台任务队列**、**长期记忆**、批量文件整理、计算换算、笔记与待办、密码与验证码、网络体检、Office 进阶。
+* **363 个工具 / 35 个 server**：文件、命令、网页、Office、图片、PDF、二维码、压缩包、SQLite、桌面自动化、语音、系统监控、网络与安全、开发工具、文本/数据转换、备份、HTTP 文件共享、计划任务、软件安装、注册表、网络高级设置、**视觉识别（看屏幕/看图/OCR）**、**后台任务队列**、**长期记忆**、**计划执行**、**审计与策略**、批量文件整理、计算换算、笔记与待办、密码与验证码、网络体检、Office 进阶。
 * **图形控制台**：启停、改配置、勾选 server、一键自检/体检/测试对话、实时日志、可滚动自适应布局、窗口尺寸记忆、开机自启。
-* **单 exe 自包含**：33 个 server 全部编进同一个可执行文件（子进程用 `exe --mcp-server <name>` 复用自己的二进制），不需要额外文件。
+* **单 exe 自包含**：35 个 server 全部编进同一个可执行文件（子进程用 `exe --mcp-server <name>` 复用自己的二进制），不需要额外文件。
+* **3.0 可管控的智能体**：多身份路由（`profiles`，按 header/model/key 分流并各自限定工具集）、**计划执行**（`plan_*`：跨轮次的目标拆解，完成必须附真实工具输出作为证据）、**策略与审计**（`policy` 可禁某类工具 + `audit.db` 记录每一次调用的参数与耗时，密钥自动打码）、**网页控制台** `/dashboard`（服务器/任务/计划/审计/指标，3 秒自动刷新）、JSON 结构化日志 + 自动轮转。
 * **2.0 后台任务**：长活用 `job_start` 丢给电脑自己跑（SQLite 队列 + 工作线程），跑完自动把结果交回下一轮对话，并在电脑上弹通知。
 * **2.0 长期记忆**：SQLite FTS5（trigram，中文子串也能搜）持久记忆，重启不丢。
 * **2.0 插件式扩展**：把 `servers/mcp_xxx.py` 丢进目录就会被自动发现并启用，不再需要改任何注册表。
-* **2.0 可观测**：`/v2/health`、`/v2/jobs`、`/metrics`（任务数、工具数、token 计数），`--jobs` 看队列，`--migrate` 升级旧配置。
+* **2.0 可观测**：`/v2/health`、`/v2/jobs`、`/v2/plans`、`/v2/audit`、`/metrics`，`--jobs`/`--plans`/`--audit` 看队列与轨迹，`--migrate` 升级旧配置。
 * **零第三方依赖的 MCP 实现**：`mcp_client.py` 是手写的 JSON-RPC over stdio 客户端，`servers/mcpserver.py` 是同款服务端骨架——加一个新工具只要 20 行。
 * **离线可测**：内置假上游（会说文本协议 / 会说原生 function calling 两种），`--self-test` 能跑 200 项样例调用。
 
@@ -126,7 +127,7 @@ powershell -ExecutionPolicy Bypass -File .\build-exe.ps1 -OneFile # 单文件
 
 控制台里有「测试视觉」按钮：发一张 96×96 小图给视觉模型，几秒内就能确认 key 与模型是否可用。
 
-## 工具清单（353 / 33 servers）
+## 工具清单（363 / 35 servers）
 
 | server | 数量 | 能力 |
 |---|---|---|
@@ -163,6 +164,8 @@ powershell -ExecutionPolicy Bypass -File .\build-exe.ps1 -OneFile # 单文件
 | `office2` | 11 | Word 加表格/批量替换/合并/转 Markdown，Excel 加工作表/填公式/加图表/转 Markdown，PPT 插图片/按大纲生成，Office 文件体检 |
 | `jobs` | 6 | **后台任务队列**：job_start（单步或一串动作）/ job_list / job_status / job_wait / job_cancel / job_stats——跑完把结果交回下一轮对话，并在电脑上弹通知 |
 | `memory` | 6 | **长期记忆**：memory_add / memory_search（FTS5 trigram，中文子串可搜）/ memory_recent / memory_get / memory_forget / memory_stats，SQLite 持久化，重启不丢 |
+| `plan` | 7 | **计划执行**：plan_create（目标拆成步骤）/ plan_next（下一件要做的事）/ plan_done（必须附真实工具输出作为证据）/ plan_add_step（边做边加）/ plan_status / plan_list / plan_cancel，跨轮次与重启存活 |
+| `audit` | 3 | **审计与策略查询**：audit_tail（最近调用了什么、参数、耗时、成功与否）/ audit_stats（窗口统计、最忙工具、各身份分布）/ policy_status（当前策略允许与禁止了什么） |
 
 ## 写一个自己的 MCP server
 
