@@ -18,8 +18,18 @@
     "api_key": "YOUR_DEEPSEEK_KEY",
     "model": "deepseek-flash",
     "detail": "auto",
+    "thinking": "disabled",
     "max_pixels": 1300,
     "inherit_upstream_key": true
+  },
+  "jobs": {
+    "enabled": true,
+    "workers": 1,
+    "notify": true,
+    "db": ""
+  },
+  "memory": {
+    "auto_index": true
   },
   "proxy": {
     "enabled": true,
@@ -73,6 +83,8 @@
     { "name": "notes", "enabled": true },
     { "name": "pwd", "enabled": true },
     { "name": "netcheck", "enabled": true },
-    { "name": "office2", "enabled": true }
+    { "name": "office2", "enabled": true },
+    { "name": "jobs", "enabled": true },
+    { "name": "memory", "enabled": true }
   ]
 }

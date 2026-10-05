@@ -74,7 +74,8 @@ def hide_console():
             pass
 
 
-CLI_FLAGS = ("--tools", "--self-test", "--doctor", "--version")
+CLI_FLAGS = ("--tools", "--self-test", "--doctor", "--version", "--init", "--jobs",
+             "--jobs-run", "--migrate")
 
 
 def main():
@@ -109,13 +110,18 @@ ABOUT_TEXT = """%(name)s  v%(version)s
 
 当前工具：%(tools)s 个 / %(servers)s 个 MCP server
 配置示例：configs/bridge.config.example.json
-命令行 : --tools  --self-test  --doctor  --version  --init  --mcp-server <name>"""
+命令行 : --tools  --self-test  --doctor  --version  --init  --jobs  --migrate  --mcp-server <name>"""
 
-SERVERS = ("fs", "shell", "web", "sys", "office", "media", "archive", "sqlite",
-           "desktop", "voice", "monitor", "net", "dev", "forensics",
-           "text", "pdf", "qr", "backup", "http", "media2", "sched", "soft",
-           "registry", "netadv", "vision", "files2", "calc", "notes", "pwd",
-           "netcheck", "office2")
+# 2.0: the list is discovered from servers/mcp_*.py, so a dropped-in file shows up here.
+try:
+    import server_host as _server_host
+    SERVERS = tuple(_server_host.server_names())
+except Exception:  # noqa: BLE001
+    SERVERS = ("fs", "shell", "web", "sys", "office", "media", "archive", "sqlite",
+               "desktop", "voice", "monitor", "net", "dev", "forensics",
+               "text", "pdf", "qr", "backup", "http", "media2", "sched", "soft",
+               "registry", "netadv", "vision", "files2", "calc", "notes", "pwd",
+               "netcheck", "office2", "jobs", "memory")
 
 
 class _Writer:
@@ -205,6 +211,7 @@ class Console(Tk):
                           ("体检", lambda: self.run_cmd("doctor")),
                           ("测试对话", self.test_chat),
                           ("测试视觉", self.test_vision),
+                          ("后台任务", self.show_jobs),
                           ("关于", self.show_about)):
             ttk.Button(bar, text=text, command=cmd).pack(side=LEFT, padx=(0, 6))
         ttk.Button(bar, text="清空日志", command=self.clear_log).pack(side=RIGHT)
@@ -321,6 +328,21 @@ class Console(Tk):
         version.bind("<Button-1>", lambda _e: webbrowser.open(bridge.APP_URL))
         self._load_config_into_ui()
         self.after(300, self._init_sash)
+
+    def show_jobs(self):
+        """后台任务面板（2.0）：看队列和结果。"""
+        if bridge.HUB is None and self.server is None:
+            messagebox.showinfo("提示", "先点「启动」，再看后台任务")
+            return
+
+        def worker():
+            hub = bridge.start_hub()
+            out, err = hub.call("jobs_job_list", {"limit": 20})
+            self.say("—— 后台任务 ——")
+            for line in (out or err or "(没有任务)").splitlines():
+                self.say("  " + line)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def test_vision(self):
         """Call the vision server's probe tool through the running hub."""

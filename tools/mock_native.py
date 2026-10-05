@@ -9,9 +9,14 @@ Used to verify proxy.py offline:
   * otherwise                       -> plain reply
 """
 import json
+import re
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+_FLAKY = {"count": 0}
+_FLAKY_LOCK = threading.Lock()
 
 
 def last_of(messages, role):
@@ -40,8 +45,24 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
-        body = json.loads(self.rfile.read(length).decode("utf-8", "replace") or "{}")
+        raw = self.rfile.read(length)
+        body = json.loads(raw.decode("utf-8", "replace") or "{}")
         messages = body.get("messages") or []
+        joined = "\n".join(m.get("content") or "" for m in messages if isinstance(m.get("content"), str))
+        # Flaky mode: fail the first N calls, then behave normally (drives retry tests).
+        match = re.search(r"FLAKY:(\d+)", joined)
+        if match:
+            wanted = int(match.group(1))
+            with _FLAKY_LOCK:
+                if _FLAKY["count"] < wanted:
+                    _FLAKY["count"] += 1
+                    data = json.dumps({"error": {"message": "temporary upstream failure"}}).encode()
+                    self.send_response(503)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
         tool_message = last_of(messages, "tool")
         user_text = last_of(messages, "user").get("content") or ""
         offered = [t["function"]["name"] for t in (body.get("tools") or [])]

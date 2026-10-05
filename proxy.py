@@ -61,13 +61,33 @@ def upstream_base():
     return (proxy_cfg().get("upstream_base") or "https://api.deepseek.com/v1").rstrip("/")
 
 
-def upstream_post(path, payload, auth, timeout=240):
+RETRY_STATUS = (408, 409, 425, 429, 500, 502, 503, 504)
+
+
+def upstream_post(path, payload, auth, timeout=240, attempts=3):
+    """POST to the upstream, retrying transient failures with a short backoff."""
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(upstream_base() + path, data=data, method="POST",
-                                 headers={"Content-Type": "application/json",
-                                          "Authorization": auth or ("Bearer " + proxy_cfg().get("upstream_api_key", ""))})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8", "replace"))
+    url = upstream_base() + path
+    headers = {"Content-Type": "application/json",
+               "Authorization": auth or ("Bearer " + proxy_cfg().get("upstream_api_key", ""))}
+    last = None
+    for attempt in range(1, max(1, int(attempts)) + 1):
+        req = urllib.request.Request(url, data=data, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as exc:
+            last = exc
+            if exc.code not in RETRY_STATUS or attempt >= attempts:
+                raise
+            log("  upstream HTTP %s - retry %d/%d in %.1fs" % (exc.code, attempt, attempts, 0.6 * attempt))
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last = exc
+            if attempt >= attempts:
+                raise
+            log("  upstream %s - retry %d/%d in %.1fs" % (type(exc).__name__, attempt, attempts, 0.6 * attempt))
+        time.sleep(0.6 * attempt)
+    raise last if last else RuntimeError("upstream request failed")
 
 
 def upstream_open(path, payload, auth, timeout=240):
@@ -268,6 +288,57 @@ def mask_args(args):
     return safe
 
 
+def drain_job_results(limit=3):
+    """Finished background jobs the persona has not reported yet.
+
+    The job engine lives in the bridge, so this is one small local HTTP call; marking
+    them delivered here means each result is reported exactly once.
+    """
+    port = (bridge.CFG.get("listen") or {}).get("port", 8877)
+    url = "http://127.0.0.1:%s/v2/jobs?pending=1&mark=1&limit=%d" % (port, max(1, int(limit)))
+    try:
+        with urllib.request.urlopen(url, timeout=6) as resp:
+            return (json.loads(resp.read().decode("utf-8", "replace") or "{}").get("jobs") or [])
+    except Exception:  # noqa: BLE001 - the bridge may be busy; results simply wait
+        return []
+
+
+def job_report_block(jobs):
+    """Human-readable 'what your background jobs did' block for the system hint."""
+    if not jobs:
+        return ""
+    lines = ["【后台任务回执】你之前派出去的任务已经跑完，请在回复里主动向用户交代（不要说不知道、也不要否认做过）："]
+    for job in jobs:
+        head = "· %s：%s" % (job.get("title") or job.get("kind") or "任务",
+                            "完成" if job.get("status") == "done" else job.get("status"))
+        body = (job.get("result") or job.get("error") or "").strip()
+        lines.append("%s\n%s" % (head, body[:1200] if body else "(没有输出)"))
+    return "\n".join(lines)
+
+
+def auto_index_jobs(hub, jobs):
+    """Keep a searchable memory of what the PC did while the user was away."""
+    if not (bridge.CFG.get("memory") or {}).get("auto_index", True) or not jobs:
+        return
+    for job in jobs:
+        summary = "%s [%s] %s" % (job.get("title") or job.get("kind"), job.get("status"),
+                                  (job.get("result") or job.get("error") or "")[:600])
+        try:
+            hub.call("memory_memory_add", {"text": summary, "tags": "后台任务",
+                                           "source": "job:%s" % job.get("id")})
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def note_usage(usage):
+    """Accumulate token counters for /metrics and log them once per request."""
+    if not usage:
+        return
+    metrics = bridge.METRICS
+    metrics["prompt_tokens_total"] = metrics.get("prompt_tokens_total", 0) + int(usage.get("prompt_tokens") or 0)
+    metrics["completion_tokens_total"] = metrics.get("completion_tokens_total", 0) + int(usage.get("completion_tokens") or 0)
+
+
 def native_tools(hub):
     tools = []
     for spec in hub.specs:
@@ -319,9 +390,17 @@ def run_tool_loop(body, auth, on_event=None):
         log("  scrubbed %d protocol-contaminated message(s) from history" % (len(raw_messages) - len(messages)))
     if proxy_cfg().get("inject_tool_hint", True):
         cfg_now = proxy_cfg()
-        hint = TOOL_HINT % {"rounds": int(cfg_now.get("max_tool_rounds", 40) or 40),
-                            "seconds": int(float(cfg_now.get("max_seconds", 420) or 420))}
+        hint = TOOL_HINT % {"rounds": int(cfg_now.get("max_tool_rounds", 12) or 12),
+                            "seconds": int(float(cfg_now.get("max_seconds", 120) or 120))}
         hint += "\n" + vision_status_line(auth)
+        hint += ("\n【8b 后台任务】长活（翻一整轮推荐流、批量处理一堆文件、盯着某个目录）"
+                 "用 job_start 丢给电脑自己跑，别占着这一轮等：派出去之后先回用户一句，"
+                 "任务跑完的结果会在你下一轮开口时自动交给你。job_list 看队列，job_cancel 取消。")
+        finished_jobs = drain_job_results()
+        if finished_jobs:
+            hint += "\n\n" + job_report_block(finished_jobs)
+            auto_index_jobs(hub, finished_jobs)
+            log("  delivered %d background job result(s) into this turn" % len(finished_jobs))
         messages.insert(0, {"role": "system", "content": hint})
     tools = native_tools(hub)
     extra = {k: v for k, v in body.items() if k in ("temperature", "top_p", "max_tokens", "frequency_penalty", "presence_penalty", "response_format")}
@@ -350,6 +429,7 @@ def run_tool_loop(body, auth, on_event=None):
                        "tools": tools, "tool_choice": "auto"}
         payload.update(extra)
         data = upstream_post("/chat/completions", payload, auth)
+        note_usage(data.get("usage"))
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         calls = message.get("tool_calls") or []
@@ -607,6 +687,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._relay(body, auth, "/chat/completions")
             return
         log("tool request: model=%s messages=%d stream=%s" % (model, len(body.get("messages") or []), body.get("stream")))
+        bridge.METRICS["requests_total"] = bridge.METRICS.get("requests_total", 0) + 1
         token = remember_key(auth)
         if token:
             log("  remembered the app's key (%s...) for vision calls" % token[:6])

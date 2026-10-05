@@ -21,6 +21,15 @@
     "max_pixels": 1300,
     "inherit_upstream_key": false
   },
+  "jobs": {
+    "enabled": false,
+    "workers": 1,
+    "notify": false,
+    "db": ""
+  },
+  "memory": {
+    "auto_index": false
+  },
   "proxy": {
     "enabled": false,
     "listen": { "host": "127.0.0.1", "port": 8892 },
@@ -73,6 +82,8 @@
     { "name": "notes", "enabled": true },
     { "name": "pwd", "enabled": true },
     { "name": "netcheck", "enabled": true },
-    { "name": "office2", "enabled": true }
+    { "name": "office2", "enabled": true },
+    { "name": "jobs", "enabled": true },
+    { "name": "memory", "enabled": true }
   ]
 }

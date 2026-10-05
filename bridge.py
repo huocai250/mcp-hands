@@ -19,6 +19,7 @@ and exposes a normal OpenAI-compatible endpoint to desktop clients.
 import json
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -32,11 +33,11 @@ sys.path.insert(0, HERE)
 
 # ------------------------------------------------------------------ branding
 APP_NAME = "mcp-hands"
-APP_VERSION = "1.1.7"
+APP_VERSION = "2.0.0"
 APP_AUTHOR = "huocai250"
 APP_URL = "https://github.com/huocai250/mcp-hands"
 APP_LICENSE = "MIT"
-APP_TAGLINE = "把手机里的人设接上电脑的 335 个工具，能看图、能读屏幕"
+APP_TAGLINE = "把手机里的人设接上电脑的 353 个工具：能看图、能读屏幕、能自己干长活"
 
 
 def version_line():
@@ -62,6 +63,7 @@ if "--mcp-server" in ARGV:
     run_server(ARGV[ARGV.index("--mcp-server") + 1])
     raise SystemExit(0)
 
+from jobs import JobRunner, JobStore  # noqa: E402
 from mcp_client import ToolHub  # noqa: E402
 
 
@@ -101,6 +103,8 @@ DEFAULT_CONFIG = {
         "max_pixels": 1300,
         "inherit_upstream_key": True,
     },
+    "jobs": {"enabled": True, "workers": 1, "notify": True, "db": ""},
+    "memory": {"auto_index": True},
     "servers": [
         {"name": "fs", "enabled": True, "env": {"MCP_FS_ROOTS": os.path.expanduser("~")}},
         {"name": "shell", "enabled": True},
@@ -133,6 +137,8 @@ DEFAULT_CONFIG = {
         {"name": "pwd", "enabled": True},
         {"name": "netcheck", "enabled": True},
         {"name": "office2", "enabled": True},
+        {"name": "jobs", "enabled": True},
+        {"name": "memory", "enabled": True},
     ],
 }
 
@@ -188,12 +194,125 @@ def load_config():
     proxy.setdefault("progress_stream", True)
     proxy.setdefault("progress_max", 3)
     cfg.setdefault("vision", {}).setdefault("thinking", "disabled")
+    jobs = cfg.setdefault("jobs", {})
+    jobs.setdefault("enabled", True)
+    jobs.setdefault("workers", 1)
+    jobs.setdefault("notify", True)
+    cfg.setdefault("memory", {}).setdefault("auto_index", True)
     return cfg
+
+
+# Keys added after a config was first written. `--migrate` fills them in without
+# touching anything the user already set.
+MIGRATIONS = {
+    "vision.base_url": "https://api.deepseek.com/v1",
+    "vision.api_key": "",
+    "vision.model": "deepseek-flash",
+    "vision.detail": "auto",
+    "vision.thinking": "disabled",
+    "vision.max_pixels": 1300,
+    "vision.inherit_upstream_key": True,
+    "proxy.enabled": True,
+    "proxy.max_tool_rounds": 12,
+    "proxy.max_seconds": 120,
+    "proxy.heartbeat_seconds": 5,
+    "proxy.vision_check_seconds": 600,
+    "proxy.step_report": "brief",
+    "proxy.progress_stream": True,
+    "proxy.progress_max": 3,
+    "proxy.inject_tool_hint": True,
+    "jobs.enabled": True,
+    "jobs.workers": 1,
+    "jobs.notify": True,
+    "jobs.db": "",
+    "memory.auto_index": True,
+}
+NEW_SERVERS = ("jobs", "memory")
+
+
+def migrate_config(path=None):
+    """Add missing keys/servers to an existing config (keeps a .bak copy)."""
+    target = path or CONFIG_PATH
+    with open(target, encoding="utf-8-sig") as fh:
+        cfg = json.load(fh)
+    added = []
+    for dotted, value in MIGRATIONS.items():
+        section, key = dotted.split(".", 1)
+        block = cfg.setdefault(section, {})
+        if key not in block:
+            block[key] = value
+            added.append(dotted)
+    names = {s.get("name") for s in cfg.get("servers", [])}
+    for name in NEW_SERVERS:
+        if name not in names:
+            cfg.setdefault("servers", []).append({"name": name, "enabled": True})
+            added.append("servers.%s" % name)
+    if not added:
+        return "config already up to date: %s (v%s)" % (target, APP_VERSION)
+    shutil.copyfile(target, target + ".bak")
+    with open(target, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(cfg, fh, ensure_ascii=False, indent=2)
+    return "migrated %s\nadded: %s\nbackup: %s.bak" % (target, ", ".join(sorted(added)), target)
 
 
 CFG = load_config()
 UP = CFG["upstream"]
 HUB = None
+STARTED_AT = time.time()
+# Prometheus-style counters exposed at /metrics.
+METRICS = {"requests_total": 0, "tool_calls_total": 0, "prompt_tokens_total": 0,
+           "completion_tokens_total": 0, "errors_total": 0}
+_JOBS = None
+_RUNNER = None
+
+
+def job_store():
+    """Durable job queue (2.0): one store per process, SQLite-backed."""
+    global _JOBS
+    if _JOBS is None:
+        cfg = CFG.get("jobs") or {}
+        _JOBS = JobStore(cfg.get("db") or os.path.join(BASE_DIR, "jobs.db"))
+    return _JOBS
+
+
+def _job_call_tool(name, args):
+    return start_hub().call(name, args)
+
+
+def _job_notify(job):
+    """Reach the user when a background job finishes - the app itself cannot be pushed."""
+    cfg = CFG.get("jobs") or {}
+    if cfg.get("notify", True) is False or job.get("kind") in ("silent", "test"):
+        return
+    detail = (job.get("result") or job.get("error") or "").strip().splitlines()
+    message = "%s：%s" % ("完成" if job.get("status") == "done" else "出错了",
+                          (job.get("title") or job.get("kind") or "后台任务")[:60])
+    if detail:
+        message += " - " + detail[0][:80]
+    try:
+        start_hub().call("sys_toast", {"title": "mcp-hands 后台任务", "message": message})
+    except Exception as exc:  # noqa: BLE001
+        log("job notify failed: %s" % exc)
+
+
+def job_runner():
+    """Background worker pool; started lazily so plain CLI runs stay cheap."""
+    global _RUNNER
+    if _RUNNER is None:
+        cfg = CFG.get("jobs") or {}
+        _RUNNER = JobRunner(job_store(), call_tool=_job_call_tool, log=lambda m: log("  " + m),
+                            notify=_job_notify, workers=max(1, int(cfg.get("workers", 1) or 1)))
+        if cfg.get("enabled", True) is not False:
+            _RUNNER.start()
+            log("job engine started (%d worker(s), db=%s)" % (_RUNNER.workers, job_store().path))
+    return _RUNNER
+
+
+def stop_jobs():
+    global _RUNNER
+    if _RUNNER is not None:
+        _RUNNER.stop()
+        _RUNNER = None
 
 
 def start_hub():
@@ -209,7 +328,25 @@ def start_hub():
                          "MCP_VISION_DETAIL": vision.get("detail", ""),
                          "MCP_VISION_THINKING": vision.get("thinking", ""),
                          "MCP_VISION_MAX_PIXELS": vision.get("max_pixels", "")}
-        HUB = ToolHub(CFG.get("servers", []), cwd=BASE_DIR, log=lambda m: log("  " + m),
+        # Servers that talk back to the bridge (jobs) need to know where it listens.
+        port = (CFG.get("listen") or {}).get("port", 8877)
+        extra_env = dict(extra_env or {})
+        extra_env["MCP_BRIDGE_API"] = "http://127.0.0.1:%s" % port
+        # 2.0: dropping a new servers/mcp_*.py is enough - anything on disk that the
+        # config does not mention is picked up automatically (set "enabled": false to
+        # switch one off explicitly).
+        configured = [dict(entry) for entry in CFG.get("servers", [])]
+        known = {entry.get("name") for entry in configured}
+        try:
+            from server_host import discover_names
+            fresh = [name for name in discover_names() if name not in known]
+            for name in fresh:
+                configured.append({"name": name, "enabled": True})
+            if fresh:
+                log("auto-enabled %d newly discovered server(s): %s" % (len(fresh), ", ".join(fresh)))
+        except Exception as exc:  # noqa: BLE001
+            log("server discovery skipped: %s" % exc)
+        HUB = ToolHub(configured, cwd=BASE_DIR, log=lambda m: log("  " + m),
                       entry=None if FROZEN else os.path.join(HERE, "bridge.py"),
                       extra_env=extra_env)
     return HUB
@@ -246,7 +383,7 @@ def cmd_version():
 
 
 def run_command(name):
-    """Run one of the diagnostic commands in-process; returns its exit code."""
+    """Run one of the command-line commands in-process; returns its exit code."""
     if name in ("version", "--version", "-V"):
         return cmd_version()
     if name in ("tools", "--tools"):
@@ -255,6 +392,16 @@ def run_command(name):
         return cmd_selftest()
     if name in ("doctor", "--doctor"):
         return cmd_doctor()
+    if name in ("init", "--init"):
+        print("config written: %s" % write_default_config(_opt("--config")))
+        return 0
+    if name in ("migrate", "--migrate"):
+        print(migrate_config(_opt("--config")))
+        return 0
+    if name in ("jobs", "--jobs"):
+        return cmd_jobs(int(_opt("--limit") or 20))
+    if name in ("jobs-run", "--jobs-run"):
+        return cmd_jobs_run(_opt("--jobs-run") or "")
     return 2
 
 # ------------------------------------------------------------- tool protocol
@@ -739,8 +886,105 @@ class Handler(BaseHTTPRequestHandler):
     def _sse_end(self):
         self.wfile.write(b"0\r\n\r\n")
 
+    # ----------------------------------------------------------------- v2 (jobs)
+    def _read_body(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            return json.loads(raw.decode("utf-8-sig", "replace") or "{}")
+        except json.JSONDecodeError:
+            return {}
+
+    def _v2_get(self):
+        parsed = urllib.parse.urlsplit(self.path)
+        route = parsed.path[len("/v2/"):].strip("/")
+        query = urllib.parse.parse_qs(parsed.query)
+        store = job_store()
+        if route in ("health", ""):
+            self._json({"ok": True, "version": APP_VERSION, "uptime_s": int(time.time() - STARTED_AT),
+                        "jobs": store.stats(), "metrics": METRICS,
+                        "servers": len(HUB.specs) if HUB else 0})
+            return
+        if route == "jobs":
+            if str(query.get("pending", ["0"])[0]) in ("1", "true", "yes"):
+                jobs = store.pending_delivery(limit=int(query.get("limit", ["5"])[0]))
+                if str(query.get("mark", ["0"])[0]) in ("1", "true", "yes"):
+                    store.mark_delivered([j["id"] for j in jobs])
+                self._json({"jobs": jobs, "count": len(jobs)})
+                return
+            status = query.get("status", [""])[0] or None
+            limit = int(query.get("limit", ["20"])[0])
+            self._json({"jobs": store.list(status=status, limit=limit), "stats": store.stats()})
+            return
+        if route == "jobs/stats":
+            self._json({"stats": store.stats(), "running": list(job_runner().current())})
+            return
+        if route.startswith("jobs/"):
+            job_id = route.split("/", 1)[1]
+            wait_s = float(query.get("wait", ["0"])[0] or 0)
+            job = job_runner().wait(job_id, wait_s) if wait_s > 0 else store.get(job_id)
+            if not job:
+                self._json({"error": {"message": "no such job"}}, 404)
+                return
+            self._json({"job": job})
+            return
+        self._json({"error": {"message": "not found"}}, 404)
+
+    def _v2_post(self):
+        parsed = urllib.parse.urlsplit(self.path)
+        route = parsed.path[len("/v2/"):].strip("/")
+        body = self._read_body()
+        if route == "jobs":
+            jobs_cfg = CFG.get("jobs") or {}
+            if jobs_cfg.get("enabled", True) is False:
+                self._json({"error": {"message": "jobs are disabled in the config"}}, 409)
+                return
+            try:
+                job = job_runner().submit(tool=body.get("tool", ""), args=body.get("args"),
+                                          title=body.get("title", ""), kind=body.get("kind", "task"),
+                                          steps=body.get("steps"), plan=body.get("plan"),
+                                          notify=body.get("notify", True))
+            except ValueError as exc:
+                self._json({"error": {"message": str(exc)}}, 400)
+                return
+            self._json({"job": job}, 201)
+            return
+        if route.startswith("jobs/") and route.endswith("/cancel"):
+            job_id = route.split("/")[1]
+            job = job_runner().cancel(job_id)
+            if not job:
+                self._json({"error": {"message": "no such job"}}, 404)
+                return
+            self._json({"job": job})
+            return
+        self._json({"error": {"message": "not found"}}, 404)
+
     # -------------------------------------------------------------------- routes
     def do_GET(self):
+        if self.path.startswith("/v2/"):
+            self._v2_get()
+            return
+        if self.path.startswith("/metrics"):
+            runner = job_runner()
+            hub = HUB
+            store = job_store()
+            lines = [
+                "# mcp-hands %s" % APP_VERSION,
+                "mcp_hands_tools %d" % (len(hub.specs) if hub else 0),
+                "mcp_hands_servers %d" % (len(hub.servers) if hub else 0),
+                "mcp_hands_jobs_total %d" % store.stats()["total"],
+                "mcp_hands_jobs_pending_delivery %d" % store.stats()["pending_delivery"],
+                "mcp_hands_jobs_running %d" % len(runner.current()),
+            ]
+            for key, value in (METRICS or {}).items():
+                lines.append("mcp_hands_%s %s" % (key, value))
+            body = ("\n".join(lines) + "\n").encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.startswith("/v1/models"):
             now = int(time.time())
             ids = [UP["model"], UP["model"] + "-tools"]
@@ -761,6 +1005,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": {"message": "not found"}}, 404)
 
     def do_POST(self):
+        if self.path.startswith("/v2/"):
+            self._v2_post()
+            return
         if not self.path.startswith("/v1/chat/completions"):
             self._json({"error": {"message": "not found"}}, 404)
             return
@@ -896,6 +1143,30 @@ def cmd_doctor():
     return 0
 
 
+def cmd_jobs(limit=20):
+    """--jobs: list the background queue; --jobs-run <id>: run one now (blocking)."""
+    store = job_store()
+    stats = store.stats()
+    print("jobs: total=%d %s pending_delivery=%d db=%s"
+          % (stats["total"], stats["by_status"] or {}, stats["pending_delivery"], store.path))
+    for job in store.list(limit=limit):
+        print("  %s [%-9s] %s/%s %s" % (job["id"], job["status"], job["progress"], job["total"],
+                                        (job["title"] or job["kind"])[:60]))
+        if job["error"]:
+            print("      error: %s" % job["error"][:120])
+    return 0
+
+
+def cmd_jobs_run(job_id):
+    job = job_runner().run_job(job_id)
+    if not job:
+        print("no such job: %s" % job_id)
+        return 1
+    print("%s -> %s" % (job["id"], job["status"]))
+    print((job["result"] or job["error"] or "")[:4000])
+    return 0 if job["status"] == "done" else 1
+
+
 def main():
     if "--version" in ARGV or "-V" in ARGV:
         raise SystemExit(cmd_version())
@@ -905,6 +1176,13 @@ def main():
         raise SystemExit(cmd_doctor())
     if "--self-test" in ARGV:
         raise SystemExit(cmd_selftest())
+    if "--migrate" in ARGV:
+        print(migrate_config())
+        raise SystemExit(0)
+    if "--jobs" in ARGV:
+        raise SystemExit(cmd_jobs(int(_opt("--limit") or 20)))
+    if "--jobs-run" in ARGV:
+        raise SystemExit(cmd_jobs_run(_opt("--jobs-run")))
     if "--init" in ARGV:
         print("config written: %s" % write_default_config(_opt("--config")))
         raise SystemExit(0)
@@ -912,12 +1190,14 @@ def main():
     host = CFG["listen"]["host"]
     port = int(_opt("--port") or CFG["listen"]["port"])
     hub = start_hub()
+    runner = job_runner()
     log("=" * 62)
     log("%s" % version_line())
     log("mode     : %s" % ("packed exe" if FROZEN else "source"))
     log("listen   : http://%s:%d/v1" % (host, port))
     log("upstream : %s (%s, model=%s)" % (UP.get("name"), UP["base_url"], UP["model"]))
     log("tools    : %d from %d MCP servers" % (len(hub.specs), len(hub.servers)))
+    log("jobs     : %s worker(s), queued=%d" % (runner.workers, job_store().stats()["by_status"].get("pending", 0)))
     log("config   : %s" % CONFIG_PATH)
     log("=" * 62)
     srv = ThreadingHTTPServer((host, port), Handler)
@@ -927,6 +1207,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        stop_jobs()
         hub.stop()
 
 
