@@ -1,0 +1,57 @@
+{
+  "listen": { "host": "127.0.0.1", "port": 8877 },
+  "upstream": {
+    "name": "phone-persona",
+    "base_url": "http://PHONE_LAN_IP:8866/v1",
+    "api_key": "YOUR_PHONE_APP_KEY",
+    "model": "aiyu-proxy",
+    "timeout_s": 240,
+    "temperature": null
+  },
+  "tool_mode": "text-protocol",
+  "always_expose_tools": true,
+  "max_tool_rounds": 4,
+  "upstream_history": "last_user_only",
+  "include_client_system": false,
+  "proxy": {
+    "enabled": true,
+    "listen": { "host": "0.0.0.0", "port": 8890 },
+    "upstream_base": "https://api.deepseek.com/v1",
+    "upstream_api_key": "",
+    "tool_models": ["deepseek-flash", "deepseek-chat", "deepseek-reasoner"],
+    "max_tool_rounds": 6,
+    "inject_tool_hint": true
+  },
+  "servers": [
+    {
+      "name": "fs",
+      "enabled": true,
+      "env": {
+        "MCP_FS_ROOTS": "%USERPROFILE%\\Desktop;%USERPROFILE%\\Documents;%USERPROFILE%\\Downloads"
+      }
+    },
+    { "name": "shell", "enabled": true },
+    { "name": "web", "enabled": true },
+    { "name": "sys", "enabled": true },
+    { "name": "office", "enabled": true },
+    { "name": "media", "enabled": true },
+    { "name": "archive", "enabled": true },
+    { "name": "sqlite", "enabled": true },
+    { "name": "desktop", "enabled": true },
+    { "name": "voice", "enabled": true },
+    { "name": "monitor", "enabled": true },
+    { "name": "net", "enabled": true },
+    { "name": "dev", "enabled": true },
+    { "name": "forensics", "enabled": true },
+    { "name": "text", "enabled": true },
+    { "name": "pdf", "enabled": true },
+    { "name": "qr", "enabled": true },
+    { "name": "backup", "enabled": true },
+    { "name": "http", "enabled": true },
+    { "name": "media2", "enabled": true },
+    { "name": "sched", "enabled": true },
+    { "name": "soft", "enabled": true },
+    { "name": "registry", "enabled": true },
+    { "name": "netadv", "enabled": true }
+  ]
+}
