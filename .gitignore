@@ -23,3 +23,12 @@ gui-settings.json
 .idea/
 Thumbs.db
 desktop.ini
+
+# test / runtime artifacts
+.mcp_notes.json
+.mcp_notes.json.bak
+office2_outline.pptx
+selftest_all.txt
+*.pptx
+*.docx
+*.xlsx
