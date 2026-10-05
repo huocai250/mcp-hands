@@ -30,24 +30,60 @@ def _decode(raw):
     return raw.decode("utf-8", errors="replace")
 
 
+def _kill_tree(proc):
+    """Kill the process *and its children*.
+
+    Measured problem: `subprocess.run(timeout=...)` only kills the direct child
+    (cmd.exe / powershell.exe). A grandchild that inherits the stdout pipe keeps it open,
+    so communicate() never returns and the **shell server wedges forever** - every later
+    call then fails with "timeout waiting for tools/call" (seen in the live log, and two
+    orphan PowerShell processes were still alive).
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, creationflags=NO_WINDOW, timeout=20)
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        proc.kill()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _run(argv, timeout_s=60, cwd=None, input_text=None):
     payload = input_text.encode("utf-8") if isinstance(input_text, str) else input_text
+    flags = NO_WINDOW | (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0)
     try:
-        p = subprocess.run(
-            argv, capture_output=True, text=False,
-            timeout=float(timeout_s), cwd=cwd or WORKDIR, input=payload, creationflags=NO_WINDOW,
+        proc = subprocess.Popen(
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=cwd or WORKDIR, creationflags=flags,
+            start_new_session=(os.name != "nt"),
         )
-    except subprocess.TimeoutExpired as exc:
-        return "[timeout after %ss]\n%s" % (timeout_s, _decode(exc.stdout)[:MAX])
     except FileNotFoundError as exc:
         return "command not found: %s" % exc
-    out = _decode(p.stdout)
-    err = _decode(p.stderr)
+    timed_out = False
+    try:
+        out_raw, err_raw = proc.communicate(input=payload, timeout=float(timeout_s))
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill_tree(proc)
+        try:
+            out_raw, err_raw = proc.communicate(timeout=10)
+        except Exception:  # noqa: BLE001
+            out_raw, err_raw = b"", b""
+    out = _decode(out_raw or b"")
+    err = _decode(err_raw or b"")
     if err.strip():
         out += "\n[stderr]\n" + err
     if len(out) > MAX:
         out = out[:MAX] + "\n...[truncated %d chars]" % (len(out) - MAX)
-    return "exit=%s\n%s" % (p.returncode, out.strip())
+    if timed_out:
+        return ("[timeout after %ss - the whole process tree was killed, so the shell server "
+                "stays usable; try a narrower command or a bigger timeout_s]\n%s" % (timeout_s, out.strip()))
+    return "exit=%s\n%s" % (proc.returncode, out.strip())
 
 
 @srv.tool("run_cmd", "Run a command through cmd.exe /c (Windows) or /bin/sh -c.",

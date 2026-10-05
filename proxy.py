@@ -775,6 +775,34 @@ class ProxyHandler(BaseHTTPRequestHandler):
         else:
             self._json({"error": {"message": "not found"}}, 404)
 
+    def do_HEAD(self):
+        """HEAD for the phone-facing routes (links are checked with HEAD all the time)."""
+        if self.path.startswith("/out/"):
+            record, target = bridge.outbox().resolve(self.path[len("/out/"):].split("?")[0])
+            self.send_response(200 if record else 404)
+            if record:
+                import mimetypes
+                self.send_header("Content-Type", mimetypes.guess_type(target)[0] or "application/octet-stream")
+                try:
+                    self.send_header("Content-Length", str(os.path.getsize(target)))
+                except OSError:
+                    pass
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+        if self.path.startswith("/voice"):
+            self.send_response(200 if bridge.control_ok(self) else 401)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            return
+        if "models" in self.path or self.path.startswith("/v2/"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            return
+        self.send_response(404)
+        self.end_headers()
+
     def do_POST(self):
         # 4.1: the phone posts what it heard (and what it spoke) here.
         if self.path.startswith("/v2/voice"):

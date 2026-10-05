@@ -49,10 +49,13 @@ class McpServer:
         return self._proc is not None and self._proc.poll() is None
 
     def restart(self):
-        """Bring this one server back after a crash; the others keep running."""
+        """Bring this one server back after a crash or a wedged call; others keep running."""
         self.restarts += 1
         self.log.append("restart #%d of server %s" % (self.restarts, self.name))
         self._dead = None
+        self.stop()                      # never leave the old child behind (it may be busy)
+        with self._lock:
+            self._pending.clear()        # the old process cannot answer these any more
         try:
             self.start()
         except Exception as exc:  # noqa: BLE001
@@ -163,13 +166,20 @@ class McpServer:
                 break
             except McpError as exc:
                 note = str(exc)
-                # A dead child is retried once after an automatic restart, so the caller
-                # does not have to burn a turn. "timeout waiting" is deliberately NOT
-                # retried: the tool may still be running, and repeating it could duplicate
-                # a side effect.
-                if attempt == 1 and "closed stdout" in note and self.restart():
-                    self.log.append("restarted %s and retried %s" % (self.name, tool))
-                    continue
+                if attempt == 1 and ("closed stdout" in note or "timeout waiting" in note):
+                    # A dead child is retried once transparently. A *wedged* one (a tool that
+                    # never answered) must be killed and respawned, otherwise every later
+                    # call on this server queues behind it and fails the same way - that is
+                    # exactly what the live log showed for `shell`.
+                    restarted = self.restart()
+                    if restarted and "timeout waiting" in note:
+                        raise McpError(
+                            "%s (the %s server was stuck and has been restarted; the tool would "
+                            "have needed more time - try a narrower call or a bigger timeout_s)"
+                            % (note, self.name)) from exc
+                    if restarted:
+                        self.log.append("restarted %s and retried %s" % (self.name, tool))
+                        continue
                 raise
         parts = []
         for item in (result or {}).get("content", []):
@@ -286,8 +296,18 @@ class ToolHub:
                 arguments = {k: v for k, v in arguments.items() if k in props}
                 self.log("tool '%s': ignored undeclared argument(s) %s" % (name, ", ".join(dropped)))
         started = time.perf_counter()
+        # Tools that take their own timeout (shell_run_*: timeout_s) need the hub to wait
+        # longer than its per-server default, otherwise the hub gives up first and the
+        # caller sees a bogus "server is stuck".
+        call_timeout = None
         try:
-            text, is_error = server.call_tool(tool, arguments)
+            wanted = float((arguments or {}).get("timeout_s") or 0)
+            if wanted > 0:
+                call_timeout = max(server.timeout, wanted + 30.0)
+        except (TypeError, ValueError):
+            call_timeout = None
+        try:
+            text, is_error = server.call_tool(tool, arguments, timeout=call_timeout)
         except McpError as exc:
             self._audit(name, arguments, False, str(exc), time.perf_counter() - started, 0)
             return str(exc), True

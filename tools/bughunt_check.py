@@ -417,6 +417,72 @@ report(24, "opening the voice page is recorded (page_opened / connected split)",
                                                           after_stats.get("last_event"),
                                                           after_stats.get("calls")))
 
+# 25. HEAD must work on our own routes (the persona checks links with HEAD, and a 501
+# looks like a broken link - that sent her chasing ghosts for a whole session)
+def head(path, port=BRIDGE_PORT):
+    request = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path), method="HEAD")
+    try:
+        with urllib.request.urlopen(request, timeout=10) as resp:
+            return resp.status, resp.headers.get("Content-Type", "")
+    except urllib.error.HTTPError as exc:
+        return exc.code, ""
+
+
+head_file = os.path.join(STATE, "head-probe.txt")
+with open(head_file, "w", encoding="utf-8") as fh:
+    fh.write("head probe")
+head_item = post("/v2/outbox", {"path": head_file, "kind": "text"})
+head_url = (head_item.get("item") or {}).get("url") or ""
+head_path = "/out/" + head_url.rsplit("/out/", 1)[-1] if "/out/" in head_url else "/out/nope"
+status_ok, ctype_ok = head(head_path)
+status_bad, _ = head("/out/deadbeef.cafe")
+status_health, _ = head("/v2/health")
+report(25, "HEAD works on our routes and reports the real status",
+       not (status_ok == 200 and status_bad == 404 and status_health == 200),
+       "real=%s missing=%s health=%s type=%s" % (status_ok, status_bad, status_health, ctype_ok))
+
+# 26. a wedged server must be killed and respawned, not left to poison later calls
+shell = next((srv for srv in bridge.HUB.servers if srv.name == "shell"), None) if bridge.HUB else None
+if shell is not None:
+    before = shell.restarts
+    keep = shell.timeout
+    shell.timeout = 0.3                       # make the hub give up almost immediately
+    slow, slow_err = bridge.HUB.call("shell_run_cmd", {"command": "ping -n 3 127.0.0.1 >nul"})
+    shell.timeout = keep
+    out, err = bridge.HUB.call("shell_run_cmd", {"command": "echo hi"})
+    recovered = bool(out) and "hi" in out
+    report(26, "a stuck server is killed and respawned, and later calls work",
+           not (shell.restarts > before and recovered),
+           "restarts=%s->%s slow_err=%s recovered=%s" % (before, shell.restarts,
+                                                         str(slow_err)[:40], recovered))
+else:
+    report(26, "a stuck server is killed and respawned, and later calls work", True, "no hub")
+
+# 27. a shell timeout must kill the whole process tree (a surviving grandchild kept the
+# stdout pipe open, which wedged the shell server for the rest of the session)
+def orphans(pattern):
+    found = []
+    try:
+        listing = subprocess.run(["wmic", "process", "where", "name='ping.exe'", "get", "ProcessId"],
+                                 capture_output=True, timeout=30)
+        found = [line.strip() for line in (listing.stdout or b"").decode("utf-8", "replace").splitlines()
+                 if line.strip().isdigit()]
+    except Exception:  # noqa: BLE001
+        found = []
+    return found
+
+
+before_pings = orphans("ping.exe")
+timed, timed_err = bridge.HUB.call("shell_run_cmd", {"command": "ping -n 20 127.0.0.1 >nul", "timeout_s": 2})
+time.sleep(1.5)
+after_pings = orphans("ping.exe")
+after_call, _ = bridge.HUB.call("shell_run_cmd", {"command": "echo still-alive"})
+report(27, "a shell timeout kills the process tree and leaves the server usable",
+       not ("timeout after 2" in (timed or "") and len(after_pings) <= len(before_pings)
+            and "still-alive" in (after_call or "")),
+       "msg=%s pings %d->%d next=%s" % ((timed or "").splitlines()[0][:40], len(before_pings),
+                                        len(after_pings), (after_call or "").splitlines()[-1][:30]))
+
 service.stop()
 server.shutdown()
 bridge.stop_hub()

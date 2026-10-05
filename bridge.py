@@ -35,7 +35,7 @@ sys.path.insert(0, HERE)
 
 # ------------------------------------------------------------------ branding
 APP_NAME = "mcp-hands"
-APP_VERSION = "4.2.0"
+APP_VERSION = "4.3.0"
 APP_AUTHOR = "huocai250"
 APP_URL = "https://github.com/huocai250/mcp-hands"
 APP_REPO = "huocai250/mcp-hands"
@@ -1925,6 +1925,40 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json({"error": {"message": "not found"}}, 404)
 
+    def do_HEAD(self):
+        """HEAD on our own routes: same status/headers as GET, no body.
+
+        The persona checks links with HEAD; without this the server answered 501
+        (Unsupported method), which looks like a broken link and sent her chasing ghosts.
+        """
+        route = urllib.parse.urlsplit(self.path).path
+        if route.startswith("/out/"):
+            record, target = outbox().resolve(route[len("/out/"):].split("?")[0])
+            self.send_response(200 if record else 404)
+            if record:
+                import mimetypes
+                self.send_header("Content-Type", mimetypes.guess_type(target)[0] or "application/octet-stream")
+                try:
+                    self.send_header("Content-Length", str(os.path.getsize(target)))
+                except OSError:
+                    pass
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+        if route.startswith("/voice") or route.startswith("/dashboard"):
+            self.send_response(200 if control_ok(self) else 401)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            return
+        if route.startswith("/v2/") or route in ("/metrics", "/health", "/"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("X-mcp-hands-Version", APP_VERSION)
+            self.end_headers()
+            return
+        self.send_response(404)
+        self.end_headers()
+
     def do_POST(self):
         if self.path.startswith("/v2/"):
             self._v2_post()
@@ -2322,7 +2356,13 @@ def main():
     log("jobs     : %s worker(s), queued=%d" % (runner.workers, job_store().stats()["by_status"].get("pending", 0)))
     log("config   : %s" % CONFIG_PATH)
     fs_entry = next((s for s in (CFG.get("servers") or []) if s.get("name") == "fs"), {})
-    log("fs roots : %s" % ((fs_entry.get("env") or {}).get("MCP_FS_ROOTS") or "(user home)"))
+    fs_roots = str((fs_entry.get("env") or {}).get("MCP_FS_ROOTS") or "")
+    log("fs roots : %s" % (fs_roots or "(user home)"))
+    missing = [part for part in fs_roots.split(";") if part.strip() and not os.path.isdir(part.strip())]
+    if missing:
+        log("WARNING  : %d configured fs root(s) do not exist: %s - the persona cannot read "
+            "anything outside a root that exists (fix it in the console's 文件根目录 field)"
+            % (len(missing), "; ".join(missing)))
     log("voice    : %s" % ("on - open http://%s:%s/voice on the phone" % (lan_ip(), proxy_port)
                            if (CFG.get("proxy") or {}).get("enabled", True) is not False else "off"))
     dashboard_host = host if host not in ("0.0.0.0", "::", "") else lan_ip()
