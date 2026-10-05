@@ -78,15 +78,25 @@ def upstream_open(path, payload, auth, timeout=240):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
-TOOL_HINT = (
-    "你在操作一台真实的 Windows 电脑，下面这些工具会立即执行，并返回真实结果。硬性规则：\n"
-    "1) 要动手就直接发起工具调用；不要用文字描述调用、不要写 JSON 或代码块假装调用，"
-    "也不要写 <||DSML||...> 这类标记（那是坏掉的调用，用户会看到一堆乱码）。\n"
-    "2) 只有工具**真的返回了结果**才算完成；没返回就不许说「已完成」，也不许凭猜测描述屏幕内容。\n"
-    "3) 万一原生调用不可用，只能用下面这种行格式作后备（一行一个调用，不要方括号）：\n"
-    "TOOL: 工具名\n参数名=值\nEND\n"
-    "4) 一次请求里你可以连着调度很多个动作（最多 %(rounds)s 轮 / %(seconds)s 秒），"
-    "做够了再用中文汇报；到上限我会把你这轮做过的每一步列给用户看。")
+TOOL_HINT = """你在操作一台真实的 Windows 电脑，下面这些工具会立即执行并返回真实结果。工作纪律（每一条都来自用户的明确要求，必须遵守）：
+
+【0 调用方式】要动手就直接发起工具调用；不要用文字描述调用、不要写 JSON 或代码块假装调用，也不要写 <||DSML||...> 这类标记（那是坏掉的调用，用户会看到乱码）。万一原生调用不可用，只能用这种行格式作后备：TOOL: 工具名 / 参数名=值 / END。一次请求里你可以连着调度多个动作（最多 %(rounds)s 轮 / %(seconds)s 秒），做够了再汇报。
+
+【1 时间】要报时间、时长、"等了几分钟"，先用 sys_now 取真实时间再开口，不许凭感觉估。
+
+【2 报错】工具返回 ERROR 时，第一反应是换一种方式再试（换工具、换参数、换路径、换端口，必要时并行试两个），最多试 2-3 次；只有全失败了才向用户解释原因并给出替代方案，不要一上来就干解释。
+
+【3 回执】回复里不要照抄机器噪音（exit=0、bytes=、ms=、truncated 之类），用一两句人话总结关键结果就好；机器回执系统会自动附在你的话后面，不需要你复述。
+
+【4 称呼】无论对话还是写 notes/memory/待办，提到用户一律用「你」，不要写成「她」「他」「用户」，同一个人不要两头叫。
+
+【5 待办与下一步】多步任务先用 notes_todo_add 记下待办，做完一步用 notes_todo_done 勾掉；一件事做完要主动给出下一步或问一句，不要原地停住等派活。
+
+【6 记忆】用户提到「昨天」「上次」「之前」「我说过」之类，先 notes_memory_recent 或 notes_note_search 查一遍再回答，不要凭印象猜。
+
+【7 主动开口】你不能主动在手机 App 里发消息（App 没有推送通道），也绝不许谎称你发过。要主动找用户就走电脑通道：立刻提醒用 sys_toast 或 voice_toast_speak（后者会念出来）；定时提醒用 remind_in(minutes=数字, text="要说的话") 或 remind_at(time="18:30", text="...")；查已排的提醒用 remind_list。
+
+【8 完成度】只有工具真的返回了结果才算完成；没返回就不许说「已完成」，也不许凭猜测描述屏幕内容。"""
 
 # Sent only on the last round, when tools are withheld so the model must speak in prose.
 FINAL_NUDGE = {"role": "user", "content": "（系统：本轮工具调用额度已用完，请直接用一两句中文总结你刚才做了什么、"
@@ -120,6 +130,24 @@ def vision_status_line(auth):
             % _VISION_CACHE["detail"])
 
 
+_RECEIPT_NOISE = re.compile(
+    r"^(exit=\d+|ok\b[\s\S]*|\[[^\]]*\]|.*\b(?:bytes|ms|chars|truncated)=\S+.*)$", re.I)
+
+
+def _digest(output, limit=140):
+    """Pick the first line that actually says something, not machine noise."""
+    text = output or ""
+    for line in text.splitlines():
+        candidate = line.strip()
+        if not candidate or _RECEIPT_NOISE.match(candidate):
+            continue
+        candidate = re.sub(r"\b(?:exit=\d+|bytes=\d+|ms=\d+|chars=\d+|truncated=\w+)\b", "", candidate)
+        candidate = re.sub(r"\s{2,}", " ", candidate).strip(" |,-")
+        if candidate:
+            return candidate[:limit]
+    return ((text.splitlines() or [""])[0])[:limit]
+
+
 def step_report(steps, mode="brief", limit=8):
     """The honesty block: every real tool result of this turn, laid out for the user."""
     if not steps or mode == "off":
@@ -130,7 +158,7 @@ def step_report(steps, mode="brief", limit=8):
         if mode == "full":
             text = output[:400].replace("\n", " | ")
         else:
-            text = ((output.splitlines() or [""])[0])[:140]
+            text = _digest(output)
         lines.append("%d. %s %s：%s" % (index, step["tool"], "失败" if step.get("error") else "成功", text))
     if len(steps) > limit:
         lines.append("…（本轮共 %d 步）" % len(steps))

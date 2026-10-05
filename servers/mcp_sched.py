@@ -5,6 +5,7 @@ visible. task_delete and task_run act immediately and are destructive by nature
 (there is no confirmation prompt). Commands that need an elevated shell report
 the raw OS error text instead of pretending to succeed.
 """
+import datetime
 import json
 import os
 import re
@@ -35,7 +36,54 @@ AWAKE_ON = 2147483651
 AWAKE_CLEAR = 2147483648
 AWAKE_MARKER = os.path.join(os.environ.get("TEMP") or os.path.expanduser("~"), "mcp_sched_awake.json")
 
+# Reminders: a one-shot task whose action is a small PowerShell script that pops a
+# Windows notification (and optionally speaks it). This is the only way the assistant
+# can reach the user without being asked first.
+REMIND_PREFIX = "mcp-hands-remind-"
+REMIND_DIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP") or os.path.expanduser("~"),
+                         "mcp-hands", "reminders")
+
 srv = Server("sched")
+
+
+def _tr_quote(command):
+    """schtasks needs the whole /tr value quoted, with any inner quotes escaped."""
+    if '"' in command:
+        return '"%s"' % command.replace('"', '\\"')
+    if " " in command:
+        return '"%s"' % command
+    return command
+
+
+def _remind_at(time_hhmm, text, title, speak, name, human_when):
+    label = re.sub(r"[^A-Za-z0-9_.\-]", "-", str(name).strip()) or ("auto-%s" % time_hhmm.replace(":", ""))
+    task = REMIND_PREFIX + label
+    os.makedirs(REMIND_DIR, exist_ok=True)
+    script_path = os.path.join(REMIND_DIR, "%s.ps1" % label)
+    safe_title = str(title or "mcp-hands").replace("'", "''")
+    safe_text = str(text).replace("'", "''")
+    lines = [
+        "Add-Type -AssemblyName System.Windows.Forms",
+        "$n = New-Object System.Windows.Forms.NotifyIcon",
+        "$n.Icon = [System.Drawing.SystemIcons]::Information",
+        "$n.Visible = $true",
+        "$n.ShowBalloonTip(15000, '%s', '%s', [System.Windows.Forms.ToolTipIcon]::Info)" % (safe_title, safe_text),
+        "Start-Sleep -Seconds 15",
+        "$n.Dispose()",
+    ]
+    wants_speak = _flag(speak, False)
+    if wants_speak:
+        lines.append("$v = New-Object -ComObject SAPI.SpVoice")
+        lines.append("$v.Speak('%s') | Out-Null" % safe_text)
+    with open(script_path, "w", encoding="utf-8-sig") as fh:
+        fh.write("\r\n".join(lines) + "\r\n")
+    command = '%s -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "%s"' % (PS, script_path)
+    argv = ["schtasks", "/create", "/tn", task, "/tr", _tr_quote(command), "/sc", "ONCE", "/st", time_hhmm, "/f"]
+    out = _run(argv, CREATE_TIMEOUT_S)
+    ok = "SUCCESS" in out.upper() or "成功" in out
+    head = ("reminder set: %s | %s 会弹通知%s" % (task, human_when, "并念出来" if wants_speak else "")) if ok \
+        else "reminder NOT created - schtasks refused:"
+    return "%s\nscript: %s\ncmd: %s\n%s" % (head, script_path, " ".join(argv), out)
 
 
 def _decode(raw):
@@ -183,6 +231,81 @@ def task_create_at_logon(name, command):
     return "cmd: %s\n%s" % (" ".join(argv), _run(argv, CREATE_TIMEOUT_S))
 
 
+@srv.tool("remind_in", "Set a reminder that pops a Windows notification (and optionally speaks) after N minutes. "
+                       "This is how the assistant can reach the user on its own - the phone app itself has no push channel.",
+          {"type": "object", "properties": {"minutes": {"type": "number", "default": 10},
+                                            "text": {"type": "string"},
+                                            "title": {"type": "string", "default": "mcp-hands"},
+                                            "speak": {"type": "boolean", "default": False},
+                                            "name": {"type": "string", "default": ""}},
+           "required": ["text"]})
+def remind_in(minutes=10, text="", title="mcp-hands", speak=False, name=""):
+    try:
+        minutes = max(0.0, float(minutes))
+    except (TypeError, ValueError):
+        return "minutes must be a number, got %r" % minutes
+    when = datetime.datetime.now() + datetime.timedelta(minutes=minutes)
+    return _remind_at(when.strftime("%H:%M"), text, title, speak, name, when.strftime("%Y-%m-%d %H:%M"))
+
+
+@srv.tool("remind_at", "Set a reminder for a specific clock time today (HH:MM), popping a Windows notification.",
+          {"type": "object", "properties": {"time": {"type": "string", "description": "HH:MM 24h"},
+                                            "text": {"type": "string"},
+                                            "title": {"type": "string", "default": "mcp-hands"},
+                                            "speak": {"type": "boolean", "default": False},
+                                            "name": {"type": "string", "default": ""}},
+           "required": ["time", "text"]})
+def remind_at(time, text="", title="mcp-hands", speak=False, name=""):
+    tm = _check_time(time)
+    if tm is None:
+        return "time must look like HH:MM in 24h form, got %r" % time
+    return _remind_at(tm, text, title, speak, name, tm)
+
+
+def _field(block, *labels):
+    """Read one field out of a schtasks /fo LIST block, English or localized label."""
+    for line in block.splitlines():
+        low = line.strip().lower()
+        for label in labels:
+            if low.startswith(label) and ":" in line:
+                return line.split(":", 1)[1].strip()
+    return "?"
+
+
+@srv.tool("remind_list", "List the reminders this assistant has scheduled (tasks created by remind_in / remind_at).",
+          {"type": "object", "properties": {}, "required": []})
+def remind_list():
+    out = _run(["schtasks", "/query", "/fo", "LIST"], 60)
+    blocks = [b for b in re.split(r"\r?\n\r?\n", out) if REMIND_PREFIX in b]
+    if not blocks:
+        return "no reminders are scheduled (looked for task names starting with %s)" % REMIND_PREFIX
+    lines = []
+    for block in blocks:
+        name = _field(block, "taskname", "任务名").lstrip("\\")
+        lines.append("%s | next=%s | status=%s" % (name,
+                                                   _field(block, "next run time", "下次运行时间"),
+                                                   _field(block, "status", "状态")))
+    return "reminders=%d\n%s" % (len(lines), "\n".join(lines))
+
+
+@srv.tool("remind_cancel", "Cancel a reminder created by remind_in / remind_at (by name, or 'all').",
+          {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]})
+def remind_cancel(name):
+    wanted = str(name).strip()
+    if wanted.lower() in ("all", "*"):
+        listing = remind_list()
+        names = [l.split(" |")[0].strip() for l in listing.splitlines()[1:]] if " | " in listing else []
+        if not names:
+            return listing
+        out = []
+        for item in names:
+            out.append(_run(["schtasks", "/delete", "/tn", item, "/f"], CREATE_TIMEOUT_S))
+        return "cancelled %d reminder(s)\n%s" % (len(names), "\n".join(out))
+    if not wanted.startswith(REMIND_PREFIX):
+        wanted = REMIND_PREFIX + wanted
+    return "cmd: schtasks /delete /tn %s /f\n%s" % (wanted, _run(["schtasks", "/delete", "/tn", wanted, "/f"], CREATE_TIMEOUT_S))
+
+
 @srv.tool("task_delete", "DESTRUCTIVE: delete a scheduled task immediately (schtasks /delete /f). No confirmation prompt.",
           {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]})
 def task_delete(name):
@@ -325,6 +448,7 @@ def build():
 # Safe samples: read-only listings only (no creation, deletion or plan changes).
 SAMPLES = {
     "task_list": {"filter": "", "limit": 5},
+    "remind_list": {},
     "power_plan_list": {},
     # a stock Windows task, so the sample is portable; still optional because
     # a trimmed image may not ship the Defrag folder

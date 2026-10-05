@@ -32,7 +32,7 @@ sys.path.insert(0, HERE)
 
 # ------------------------------------------------------------------ branding
 APP_NAME = "mcp-hands"
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 APP_AUTHOR = "huocai250"
 APP_URL = "https://github.com/huocai250/mcp-hands"
 APP_LICENSE = "MIT"

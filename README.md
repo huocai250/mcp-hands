@@ -146,7 +146,7 @@ powershell -ExecutionPolicy Bypass -File .\build-exe.ps1 -OneFile # 单文件
 | `backup` | 8 | 目录时间戳备份、CRC 校验、防逃逸恢复、轮换、增量镜像、单文件快照 |
 | `http` | 7 | **本地文件服务器（手机可下载电脑文件）**、共享文件、抓取到共享、局域网地址 |
 | `media2` | 12 | 拼图、切九宫格、描边、叠图、主色、图像差异、2 倍放大、GIF 制作/拆帧、EXIF |
-| `sched` | 12 | 计划任务增删改查与立即运行、电源计划、保持唤醒、休眠开关 |
+| `sched` | 16 | 计划任务增删改查与立即运行、电源计划、保持唤醒、休眠开关、**定时提醒（remind_in / remind_at / remind_list / remind_cancel：到点在电脑上弹通知，可同时念出来）** |
 | `soft` | 8 | winget 检测/搜索/安装/卸载/可升级/已安装（无 winget 走注册表）、商店页面 |
 | `registry` | 8 | 注册表读值/列子键/写值/删值/删键/搜索/导出/备份 |
 | `netadv` | 16 | Wi-Fi 配置与连接、hosts 读写还原、DNS 刷新、端口转发、防火墙规则 |
