@@ -175,6 +175,71 @@ class _Writer:
         pass
 
 
+#: Exactly the keys the console's widgets own. Everything else always comes from disk,
+#: so a long-open window cannot revert edits made elsewhere.
+UI_KEYS = {
+    "upstream": ("base_url", "api_key", "model"),
+    "listen": ("host", "port"),
+    "proxy": ("enabled", "listen", "upstream_base", "tool_models", "max_tool_rounds",
+              "max_seconds", "heartbeat_seconds", "vision_check_seconds", "step_report",
+              "progress_stream", "progress_max", "inject_tool_hint"),
+    "vision": ("base_url", "model", "api_key", "inherit_upstream_key"),
+}
+UI_TOP = ("upstream_history", "include_client_system")
+
+
+def merge_config(disk, ui, changed=()):
+    """Fold the console's widget values into whatever is on disk right now.
+
+    4.1.2 - the console used to write its whole in-memory copy, so a window open for a
+    while silently reverted changes made from outside: the live log showed the config
+    rewritten two minutes *after* the service started, which put an invalid fs sandbox
+    back and locked the persona out of D:\\.
+
+    Rules: keys the console does not own come from disk; keys it owns come from `ui`;
+    a value the user never touched (not in `changed`) is taken from disk as well.
+    """
+    disk = json.loads(json.dumps(disk or {}))
+    ui = ui or {}
+    for top, subs in UI_KEYS.items():
+        section = disk.setdefault(top, {})
+        incoming = ui.get(top) or {}
+        for sub in subs:
+            if sub in incoming:
+                section[sub] = incoming[sub]
+    for key in UI_TOP:
+        if key in ui:
+            disk[key] = ui[key]
+
+    # Servers: keep every disk-side setting (env, cwd, timeout), apply only the switch,
+    # and only touch the fs roots when the user actually edited that field.
+    ui_servers = {entry.get("name"): entry for entry in (ui.get("servers") or [])}
+    merged, seen = [], set()
+    for entry in (disk.get("servers") or []):
+        name = entry.get("name")
+        seen.add(name)
+        patched = dict(entry)
+        incoming = ui_servers.get(name) or {}
+        if incoming:
+            patched["enabled"] = bool(incoming.get("enabled", patched.get("enabled", True)))
+        wanted = (incoming.get("env") or {}).get("MCP_FS_ROOTS")
+        if wanted is not None and (name == "fs" or "fs_roots" in changed):
+            if "fs_roots" in changed:
+                env = dict(patched.get("env") or {})
+                env["MCP_FS_ROOTS"] = wanted
+                patched["env"] = env
+            elif not (patched.get("env") or {}).get("MCP_FS_ROOTS"):
+                env = dict(patched.get("env") or {})
+                env["MCP_FS_ROOTS"] = wanted
+                patched["env"] = env
+        merged.append(patched)
+    for name, incoming in ui_servers.items():          # servers the disk did not have yet
+        if name not in seen:
+            merged.append(dict(incoming))
+    disk["servers"] = merged
+    return disk
+
+
 class Console(Tk):
     def __init__(self, run_server=False):
         super().__init__()
@@ -545,6 +610,7 @@ class Console(Tk):
         self.vision_inherit.set(bool(vision.get("inherit_upstream_key", True)))
         fs_entry = next((s for s in self.config.get("servers", []) if s.get("name") == "fs"), {})
         self.fs_roots.set(str((fs_entry.get("env") or {}).get("MCP_FS_ROOTS") or ""))
+        self._fs_roots_loaded = self.fs_roots.get().strip()
         enabled = {s.get("name") for s in self.config.get("servers", []) if s.get("enabled", True) is not False}
         for name, var in self.server_vars.items():
             var.set(name in enabled)
@@ -721,7 +787,13 @@ class Console(Tk):
 
     # ------------------------------------------------------------------ config
     def save_config(self):
-        cfg = json.loads(json.dumps(self.config))  # deep copy
+        cfg = json.loads(json.dumps(self.config))  # deep copy of what this window shows
+        changed = set()
+        # Conservative default: a window that predates this attribute (or never loaded a
+        # value) counts as "not edited", so it can never push a stale sandbox back.
+        loaded = getattr(self, "_fs_roots_loaded", self.fs_roots.get().strip())
+        if self.fs_roots.get().strip() != loaded:
+            changed.add("fs_roots")                # only a real edit may overwrite disk
         cfg.setdefault("upstream", {})
         cfg["upstream"]["base_url"] = self.fields["base_url"].get().strip()
         cfg["upstream"]["api_key"] = self.fields["api_key"].get().strip()
@@ -780,12 +852,22 @@ class Console(Tk):
             if roots:
                 fs.setdefault("env", {})["MCP_FS_ROOTS"] = roots
         cfg["servers"] = [by_name[name] for name in SERVERS if name in by_name]
+        # Never write this window's stale copy over the file: merge with what is on disk
+        # right now so edits made outside (or by --migrate) survive.
+        try:
+            with open(CONFIG_PATH, encoding="utf-8-sig") as fh:
+                on_disk = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            on_disk = {}
+        merged = merge_config(on_disk, cfg, changed)
         with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
-            json.dump(cfg, fh, ensure_ascii=False, indent=2)
+            json.dump(merged, fh, ensure_ascii=False, indent=2)
+        cfg = merged
         self.config = cfg
+        self._fs_roots_loaded = self.fs_roots.get().strip()
         bridge.reload_config(CONFIG_PATH)
         self._load_config_into_ui()
-        self.say("配置已保存：%s" % CONFIG_PATH)
+        self.say("配置已保存（与磁盘上的其他改动合并）：%s" % CONFIG_PATH)
         return True
 
     def save_and_restart(self):

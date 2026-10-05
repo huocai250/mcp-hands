@@ -334,6 +334,52 @@ if victim is not None:
 else:
     report(20, "a crashed server is restarted automatically on the next call", True, "no hub to test")
 
+# 21. the console must merge with disk, never overwrite it with a stale copy
+sys.path.insert(0, ROOT)
+import importlib.util  # noqa: E402
+
+spec = importlib.util.spec_from_file_location("gui_mod", os.path.join(ROOT, "gui.py"))
+gui_mod = importlib.util.module_from_spec(spec)
+try:
+    spec.loader.exec_module(gui_mod)
+    merge = getattr(gui_mod, "merge_config", None)
+except Exception:  # noqa: BLE001  (no display / import side effects)
+    merge = None
+if merge:
+    stale_ui = {
+        "upstream": {"base_url": "http://old", "api_key": "ui", "model": "m"},
+        "proxy": {"enabled": True, "max_tool_rounds": 12},
+        "servers": [{"name": "fs", "enabled": True, "env": {"MCP_FS_ROOTS": "C:\\old"}},
+                    {"name": "calc", "enabled": False}],
+    }
+    disk = {
+        "upstream": {"base_url": "http://old", "api_key": "disk", "model": "m"},
+        "proxy": {"enabled": True, "max_tool_rounds": 12},
+        "plans": {"db": "keep-me"},
+        "control": {"token": "keep-me-too"},
+        "servers": [{"name": "fs", "enabled": True, "env": {"MCP_FS_ROOTS": "D:\\fixed"}, "timeout": 120},
+                    {"name": "calc", "enabled": True}, {"name": "voice-extra", "enabled": True}],
+    }
+    out = merge(disk, stale_ui, changed=())
+    kept_roots = (out["servers"][0].get("env") or {}).get("MCP_FS_ROOTS")
+    checks = {
+        "disk fs roots survive": kept_roots == "D:\\fixed",
+        "hidden sections survive": out.get("plans", {}).get("db") == "keep-me" and out.get("control", {}).get("token") == "keep-me-too",
+        "server env/timeout survive": out["servers"][0].get("timeout") == 120,
+        "unknown server survives": any(s.get("name") == "voice-extra" for s in out["servers"]),
+        "the switch still applies": [s for s in out["servers"] if s.get("name") == "calc"][0]["enabled"] is False,
+    }
+    bad = [name for name, ok in checks.items() if not ok]
+    report(21, "console save merges with disk instead of reverting it", bool(bad),
+           ("failed: %s" % ", ".join(bad)) if bad else ", ".join(checks))
+    edited = merge(disk, stale_ui, changed=("fs_roots",))
+    report(22, "an edited fs-roots field is the one thing that may overwrite disk",
+           (edited["servers"][0].get("env") or {}).get("MCP_FS_ROOTS") != "C:\\old",
+           (edited["servers"][0].get("env") or {}).get("MCP_FS_ROOTS"))
+else:
+    report(21, "console save merges with disk instead of reverting it", True, "gui_config_merge unavailable")
+    report(22, "an edited fs-roots field is the one thing that may overwrite disk", True, "gui_config_merge unavailable")
+
 service.stop()
 server.shutdown()
 bridge.stop_hub()
