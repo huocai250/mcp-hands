@@ -4,6 +4,8 @@
 Used to verify proxy.py offline:
   * last message is a tool result   -> final answer that quotes it
   * user text contains USE:<tool>   -> returns a real tool_calls response
+  * user text contains DSMLONLY:    -> returns DeepSeek-style DSML markup as plain text
+  * user text contains TEXTUSE:     -> returns the bridge-era text protocol
   * otherwise                       -> plain reply
 """
 import json
@@ -62,6 +64,21 @@ class Handler(BaseHTTPRequestHandler):
                 len(messages), joined.count("TOOL:") + joined.count("TOOL_PROTOCOL"),
                 joined.count("TOOL_PROTOCOL_V1") + joined.count("外部工具协议"),
                 sum(1 for m in messages if m.get("role") == "system"))}
+        elif "DSMLONLY:" in user_text:
+            # Reproduce DeepSeek emitting tool markup as *text* (no native tool_calls),
+            # the exact shape seen in the phone app.
+            line = [l for l in user_text.splitlines() if "DSMLONLY:" in l][0]
+            tool = line.split("DSMLONLY:")[1].strip().split()[0]
+            args = {}
+            if "ARGS:" in line:
+                args = json.loads(line.split("ARGS:")[1].strip())
+            params = "\n".join(
+                '<||DSML||parameter name="%s" string="%s">%s</||DSML||parameter>'
+                % (k, "true" if isinstance(v, str) else "false", v)
+                for k, v in args.items())
+            content = ("我用键盘试试～\n<||DSML||calls>\n<||DSML||invoke name=\"%s\">\n%s\n</||DSML||invoke>\n</||DSML||calls>"
+                       % (tool, params))
+            message = {"role": "assistant", "content": content}
         elif "USE:" in user_text:
             line = [l for l in user_text.splitlines() if "USE:" in l][0]
             tool = line.split("USE:")[1].strip().split()[0]

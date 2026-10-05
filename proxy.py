@@ -81,6 +81,26 @@ def upstream_open(path, payload, auth, timeout=240):
 TOOL_HINT = ("你可以调用下面这些工具来真的操作这台 Windows 电脑，工具会立即执行并返回真实结果。"
              "需要时直接发起工具调用，不要用文字描述工具调用、也不要输出 JSON 或代码块来假装调用。")
 
+# Sent only on the last round, when tools are withheld so the model must speak in prose.
+FINAL_NUDGE = {"role": "user", "content": "（系统：本轮工具调用额度已用完，请直接用一两句中文总结你刚才做了什么、"
+                                         "画面/页面现在是什么状态，不要再输出任何工具调用、标记或标记语言。）"}
+
+
+def finalize(message):
+    """Last line of defence: protocol markup must never reach the phone screen."""
+    if not isinstance(message, dict):
+        return {"role": "assistant", "content": ""}
+    content = message.get("content")
+    if isinstance(content, str) and content:
+        message = dict(message, content=bridge.strip_dsml(content))
+    text = (message.get("content") or "").strip()
+    if not text and message.get("tool_calls"):
+        text = ""
+    if not text:
+        message = dict(message, content="（这轮我做到上限了，先停一下；要我接着来就说一声。）")
+    message.pop("tool_calls", None)
+    return message
+
 # The app's own conversation still contains the bridge era text protocol (injected
 # instructions, the model's TOOL: blocks, TOOL_RESULT turns). Leaving them in the
 # prompt makes the model imitate that style instead of using native tool calls.
@@ -104,6 +124,7 @@ def scrub(text):
             return ""
     text = _TOOL_BLOCK.sub("", text)
     text = _JSON_BLOCK.sub("", text)
+    text = bridge.strip_dsml(text)
     lines = [line for line in text.splitlines() if not line.strip().startswith("TOOL_RESULT")]
     return "\n".join(lines).strip()
 
@@ -178,11 +199,17 @@ def run_tool_loop(body, auth):
             done = ", ".join(step["tool"] for step in steps[-10:]) or "什么都没来得及做"
             note = "（我已经连续操作了 %.0f 秒，先停在这里。这轮做过的动作：%s）" % (elapsed, done)
             message = {"role": "assistant",
-                       "content": ((message.get("content") or "").strip() + "\n" + note).strip()}
-            return message, steps, {}
+                       "content": (bridge.strip_dsml((message.get("content") or "").strip()) + "\n" + note).strip()}
+            return finalize(message), steps, {}
         last_round = round_no >= rounds
-        payload = {"model": model, "messages": messages, "stream": False,
-                   "tools": tools, "tool_choice": "none" if last_round else "auto"}
+        if last_round:
+            # Final round: send no tools at all. With tools still declared (and
+            # tool_choice "none") DeepSeek answers with DSML tool markup *as text*,
+            # which the phone app then shows to the user.
+            payload = {"model": model, "messages": messages + [FINAL_NUDGE], "stream": False}
+        else:
+            payload = {"model": model, "messages": messages, "stream": False,
+                       "tools": tools, "tool_choice": "auto"}
         payload.update(extra)
         data = upstream_post("/chat/completions", payload, auth)
         choice = (data.get("choices") or [{}])[0]
@@ -192,13 +219,14 @@ def run_tool_loop(body, auth):
         log("  round %d: finish=%s tool_calls=%d" % (round_no, choice.get("finish_reason"), len(calls)))
 
         if not calls:
-            # Some models still answer with the old text protocol (strong history bias
-            # or a weak function-calling model). Detect it and act on it anyway.
+            # Some models still answer with the old text protocol or with DSML markup
+            # (strong history bias, or a weak function-calling model). Act on it anyway.
             fallback = bridge.parse_tool_calls(content)
             if not fallback:
-                return message, steps, data.get("usage") or {}
-            log("  model replied with text protocol (%d call(s)) -> executing anyway" % len(fallback))
-            messages.append({"role": "assistant", "content": content})
+                return finalize(message), steps, data.get("usage") or {}
+            log("  model replied with %s (%d call(s)) -> executing anyway"
+                % ("DSML markup" if bridge.parse_dsml_calls(content) else "text protocol", len(fallback)))
+            messages.append({"role": "assistant", "content": bridge.strip_dsml(content) or content})
             results = []
             for call in fallback:
                 args = vision_args(call["name"], bridge.coerce_args(call["name"], call["arguments"]), auth)
@@ -225,12 +253,9 @@ def run_tool_loop(body, auth):
             steps.append({"tool": name, "arguments": args, "error": is_error, "output": output[:4000]})
             messages.append({"role": "tool", "tool_call_id": call.get("id") or name,
                              "content": ("[tool failed] " if is_error else "") + output[:6000]})
-    # Round budget exhausted. Never hand the app a dangling tool_call: keep only text.
-    if message.get("tool_calls"):
-        log("  round budget exhausted with a pending tool_call -> dropping it")
-        message = {"role": "assistant", "content": (message.get("content") or "").strip()
-                   or "（这轮动作做到上限了，我先停一下）"}
-    return message, steps, {}
+    # Out of rounds: never hand the app DSML markup or a dangling tool_call.
+    log("  round budget exhausted after %d step(s)" % len(steps))
+    return finalize(message), steps, {}
 
 
 class ProxyHandler(BaseHTTPRequestHandler):

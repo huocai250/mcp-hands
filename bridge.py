@@ -32,7 +32,7 @@ sys.path.insert(0, HERE)
 
 # ------------------------------------------------------------------ branding
 APP_NAME = "mcp-hands"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 APP_AUTHOR = "huocai250"
 APP_URL = "https://github.com/huocai250/mcp-hands"
 APP_LICENSE = "MIT"
@@ -401,12 +401,80 @@ def parse_json_calls(text):
     return calls
 
 
+# DeepSeek can emit its native tool-call syntax as *text* (DSML) when it wants a tool
+# but native calling is unavailable, e.g. <||DSML||invoke name="x">…</||DSML||invoke>.
+# The phone app renders that as visible text, so it must be parsed or stripped.
+_DSML_TAG = re.compile(r"<\s*(/?)\s*[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*([A-Za-z_][\w-]*)", re.I)
+_DSML_ANY = re.compile(r"<[^>]*?DSML[^>]*?>|<\s*/?\s*(?:calls|invoke|parameter)\b[^>]*>", re.I)
+_ATTR = re.compile(r'([A-Za-z_][\w-]*)\s*=\s*"([^"]*)"|([A-Za-z_][\w-]*)\s*=\s*\'([^\']*)\'')
+
+
+def _normalize_dsml(text):
+    """`<||DSML||invoke name="x">` -> `<invoke name="x">` so it can be parsed as XML-ish."""
+    return _DSML_TAG.sub(lambda m: "<%s%s" % (m.group(1), m.group(2)), text)
+
+
+def _attrs(raw):
+    found = {}
+    for match in _ATTR.finditer(raw or ""):
+        key = match.group(1) or match.group(3)
+        value = match.group(2) if match.group(1) else match.group(4)
+        found[key.lower()] = value
+    return found
+
+
+def parse_dsml_calls(text):
+    """Extract calls from DeepSeek's DSML markup. Returns a list of {name, arguments}."""
+    if not isinstance(text, str) or "DSML" not in text and "<invoke" not in text:
+        return []
+    normalized = _normalize_dsml(text)
+    calls = []
+    for block in re.finditer(r"(?ms)<invoke\b([^>]*)>(.*?)</invoke>", normalized):
+        name = _attrs(block.group(1)).get("name", "").strip()
+        if not name:
+            continue
+        args = {}
+        inner = block.group(2)
+        for param in re.finditer(r"(?ms)<parameter\b([^>]*)>(.*?)</parameter>", inner):
+            head = _attrs(param.group(1))
+            key = (head.get("name") or "").strip()
+            if not key:
+                continue
+            value = re.sub(r"</?[^>]+>", "", param.group(2)).strip()
+            # `string="false"` marks a non-string payload (number/bool/object).
+            if (head.get("string") or "true").lower() == "false":
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError:
+                    try:
+                        value = float(value) if "." in value else int(value)
+                    except ValueError:
+                        pass
+            args[key] = value
+        calls.append({"name": name, "arguments": args})
+    return calls
+
+
+def strip_dsml(text):
+    """Remove all DSML markup so it can never show up as a visible reply."""
+    if not isinstance(text, str) or ("DSML" not in text and "<invoke" not in text):
+        return text
+    cleaned = re.sub(r"(?ms)<calls\b.*?</calls>", " ", _normalize_dsml(text))
+    cleaned = re.sub(r"(?ms)<invoke\b.*?</invoke>", " ", cleaned)
+    cleaned = _DSML_ANY.sub(" ", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return "\n".join(line.rstrip() for line in cleaned.splitlines()).strip()
+
+
 def parse_tool_calls(text):
-    """Line protocol first (robust), JSON as a fallback for other models."""
+    """Line protocol first (robust), JSON/DSML as fallbacks for other models."""
     calls = parse_line_calls(text)
     if calls:
         return calls
-    return parse_json_calls(text)
+    calls = parse_json_calls(text)
+    if calls:
+        return calls
+    return parse_dsml_calls(text)
 
 
 def _cast(value, kind):
