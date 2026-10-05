@@ -112,6 +112,28 @@ def native_tools(hub):
     return tools
 
 
+def vision_args(name, args, auth):
+    """Hand the chat key + configured vision endpoint to the vision tools.
+
+    Path B relays the app's own key, so `see_screen` / `see_image` work without the
+    user pasting a key anywhere. Only parameters the tool actually declares are set.
+    """
+    if not str(name).startswith("vision_"):
+        return args
+    hub = bridge.start_hub()
+    spec = next((s for s in hub.specs if s["name"] == name), None)
+    props = ((spec or {}).get("inputSchema") or {}).get("properties") or {}
+    cfg = proxy_cfg().get("vision") or bridge.CFG.get("vision") or {}
+    token = (auth or "").replace("Bearer ", "").strip()
+    if "api_key" in props and not args.get("api_key"):
+        if cfg.get("inherit_upstream_key", True) and token and token.lower() != "aiyu":
+            args["api_key"] = token
+    for key in ("model", "base_url", "detail"):
+        if key in props and cfg.get(key) and not args.get(key):
+            args[key] = cfg[key]
+    return args
+
+
 def run_tool_loop(body, auth):
     """Returns (message, steps, usage). message is an OpenAI assistant message dict."""
     hub = bridge.start_hub()
@@ -147,7 +169,7 @@ def run_tool_loop(body, auth):
             messages.append({"role": "assistant", "content": content})
             results = []
             for call in fallback:
-                args = bridge.coerce_args(call["name"], call["arguments"])
+                args = vision_args(call["name"], bridge.coerce_args(call["name"], call["arguments"]), auth)
                 output, is_error = hub.call(call["name"], args)
                 log("  tool -> %s %s" % (call["name"], json.dumps(args, ensure_ascii=False)[:200]))
                 log("  tool <- %s %s (%d chars)" % (call["name"], "ERROR" if is_error else "ok", len(output)))
@@ -164,6 +186,7 @@ def run_tool_loop(body, auth):
                 args = json.loads(raw)
             except json.JSONDecodeError:
                 args = {"raw": raw}
+            args = vision_args(name, args, auth)
             output, is_error = hub.call(name, args)
             log("  tool -> %s %s" % (name, json.dumps(args, ensure_ascii=False)[:200]))
             log("  tool <- %s %s (%d chars)" % (name, "ERROR" if is_error else "ok", len(output)))

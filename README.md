@@ -1,6 +1,6 @@
 # mcp-hands
 
-> **给她一双手**：把**手机 App 里的人设**接上**电脑上的 261 个工具**（24 个自研 MCP server），并打包成带图形控制台的单个 exe。
+> **给她一双手**：把**手机 App 里的人设**接上**电脑上的 335 个工具**（31 个自研 MCP server），**能看图、能读屏幕**，并打包成带图形控制台的单个 exe。
 
 作者 **huocai250** · 仓库 <https://github.com/huocai250/mcp-hands> · [MIT License](LICENSE) · Windows x64
 
@@ -13,7 +13,7 @@
 └──────────────┘  带 MCP 工具   └─────────────┬─────────────┘  不发送 tools └───────────────────┘
                                               │                ▲
                     ┌─────────────────────────┴──────────┐     │ 方式 B：App 的模型服务商直接指向本机
-                    │  MCP (stdio JSON-RPC) × 24 servers │     │ 0.0.0.0:8890（原生 function calling）
+                    │  MCP (stdio JSON-RPC) × 31 servers │     │ 0.0.0.0:8890（原生 function calling）
                     └────────────────────────────────────┘     │
        fs shell web sys office media archive sqlite desktop voice monitor net dev
        forensics text pdf qr backup http media2 sched soft registry netadv
@@ -22,9 +22,9 @@
 ## 特性
 
 * **两种接入方式**：A) 电脑端任意 OpenAI 兼容客户端经桥接使用人设；B) 让手机 App 自己的聊天直接带上原生工具调用（推荐，聊天记录里不会出现工具痕迹）。
-* **261 个工具 / 24 个 server**：文件、命令、网页、Office、图片、PDF、二维码、压缩包、SQLite、桌面自动化、语音、系统监控、网络与安全、开发工具、文本/数据转换、备份、HTTP 文件共享、计划任务、软件安装、注册表、网络高级设置。
+* **335 个工具 / 31 个 server**：文件、命令、网页、Office、图片、PDF、二维码、压缩包、SQLite、桌面自动化、语音、系统监控、网络与安全、开发工具、文本/数据转换、备份、HTTP 文件共享、计划任务、软件安装、注册表、网络高级设置，外加**视觉识别（看屏幕/看图/OCR）**、批量文件整理、计算换算、笔记与待办、密码与验证码、网络体检、Office 进阶。
 * **图形控制台**：启停、改配置、勾选 server、一键自检/体检/测试对话、实时日志、可滚动自适应布局、窗口尺寸记忆、开机自启。
-* **单 exe 自包含**：24 个 server 全部编进同一个可执行文件（子进程用 `exe --mcp-server <name>` 复用自己的二进制），不需要额外文件。
+* **单 exe 自包含**：31 个 server 全部编进同一个可执行文件（子进程用 `exe --mcp-server <name>` 复用自己的二进制），不需要额外文件。
 * **零第三方依赖的 MCP 实现**：`mcp_client.py` 是手写的 JSON-RPC over stdio 客户端，`servers/mcpserver.py` 是同款服务端骨架——加一个新工具只要 20 行。
 * **离线可测**：内置假上游（会说文本协议 / 会说原生 function calling 两种），`--self-test` 能跑 200 项样例调用。
 
@@ -87,7 +87,42 @@ powershell -ExecutionPolicy Bypass -File .\build-exe.ps1 -OneFile # 单文件
 | `servers[].enabled` | 每个 server 可单独关掉 |
 | `servers[].env.MCP_FS_ROOTS` | 文件工具沙箱根目录（`;` 分隔，支持 `%USERPROFILE%` 这类环境变量） |
 
-## 工具清单（261 / 24 servers）
+## 让人设真的看见屏幕（视觉识别）
+
+人设的脑子是文本模型，所以「看屏幕」在实现上是：**截图 → 压缩 → 交给视觉模型 → 把看到的转成文字**喂回人设。
+
+* **走 App 直连代理（8890）时什么都不用配**：App 发来的 `Authorization` 里就是你的 key，代理会把它自动传给视觉调用（实测日志：`tool -> vision_see_image {..., "api_key": "sk-****"}`，视觉端确认 `key=provided`）。
+* **走桥接（8877）或命令行时**：在 `bridge.config.json` 的 `vision.api_key` 里填同一个 DeepSeek key（或设 `DEEPSEEK_API_KEY`）。
+* **模型**：默认 `deepseek-flash` —— DeepSeek 官方[图像理解文档](https://api-docs.deepseek.com/guides/vision) 明确它支持图片输入（`deepseek-v4-pro` 反而不支持）；也支持换成任意 OpenAI 兼容的视觉端点（如硅基流动的 `Qwen/Qwen3-VL-32B-Instruct`）。
+* **参数**：`vision.max_pixels`（默认 1300，DeepSeek 内部就是缩到约 1300×1300，再大只是白花上传时间）、`vision.detail`（`low` = 512×512 更省更快 / `auto` / `high`）。
+
+```jsonc
+"vision": {
+  "base_url": "https://api.deepseek.com/v1",
+  "api_key": "",                 // 留空则沿用 App 直连代理里 App 的 key
+  "model": "deepseek-flash",
+  "detail": "auto",
+  "max_pixels": 1300,
+  "inherit_upstream_key": true
+}
+```
+
+常用调用（人设自己会选）：
+
+| 想干的事 | 工具 |
+|---|---|
+| 看看我现在屏幕上是什么 | `vision_see_screen` |
+| 只读屏幕上的文字 | `vision_read_screen_text` |
+| 告诉我接下来该点哪里 | `vision_describe_ui(task="…")` |
+| 看某个窗口 | `vision_see_window(title="Chrome")` |
+| 看一张图片/照片 | `vision_see_image(path)` / `vision_read_text_in_image(path)` |
+| 看剪贴板里的图 | `vision_see_clipboard` |
+| 两张图/两个界面有什么不同 | `vision_compare_images(left, right)` |
+| 先存图再慢慢看 | `vision_screenshot_for_vision` |
+
+控制台里有「测试视觉」按钮：发一张 96×96 小图给视觉模型，几秒内就能确认 key 与模型是否可用。
+
+## 工具清单（335 / 31 servers）
 
 | server | 数量 | 能力 |
 |---|---|---|
@@ -115,6 +150,13 @@ powershell -ExecutionPolicy Bypass -File .\build-exe.ps1 -OneFile # 单文件
 | `soft` | 8 | winget 检测/搜索/安装/卸载/可升级/已安装（无 winget 走注册表）、商店页面 |
 | `registry` | 8 | 注册表读值/列子键/写值/删值/删键/搜索/导出/备份 |
 | `netadv` | 16 | Wi-Fi 配置与连接、hosts 读写还原、DNS 刷新、端口转发、防火墙规则 |
+| `vision` | 12 | **看屏幕**、看窗口、看图、看剪贴板图片、OCR 读图与读屏、以「可操作视角」描述界面（窗口/焦点/按钮/下一步点哪）、两图对比、多图提问、截图存盘 |
+| `files2` | 9 | 批量正则改名、按哈希找重复、去重搬运、按类型/月份整理、大文件与空目录、目录对比、按通配批量复制 |
+| `calc` | 11 | 表达式计算（AST 安全求值）、单位换算、进制转换、百分比、日期差/日期加减、时区当前时间、统计、取整、随机数 |
+| `notes` | 13 | 人设的长期记忆：笔记增删改查搜索、待办增删改查、事件日志与最近回顾、Markdown 导出（原子写入 + .bak） |
+| `pwd` | 9 | 强密码/助记词生成、强度评估、**TOTP 动态验证码**、哈希比对、文本密钥扫描（自动打码）、UUID、随机串、PIN |
+| `netcheck` | 9 | ping 统计、HTTP 分段耗时、TLS 证书到期、下载测速、DNS 记录、路由追踪、IP 归属、常用端口体检、Wi-Fi 质量 |
+| `office2` | 11 | Word 加表格/批量替换/合并/转 Markdown，Excel 加工作表/填公式/加图表/转 Markdown，PPT 插图片/按大纲生成，Office 文件体检 |
 
 ## 写一个自己的 MCP server
 
@@ -172,7 +214,7 @@ proxy.py             App 直连代理：给 App 的请求挂原生 tools 并跑�
 gui.py               图形控制台（打包入口）
 mcp_client.py        零依赖 MCP stdio 客户端 + 工具路由（并行启动 server）
 server_host.py       --mcp-server <name> 分发到内置 server
-servers/             24 个 MCP server + mcpserver.py（服务端骨架）
+servers/             31 个 MCP server + mcpserver.py（服务端骨架）
 configs/             示例配置（example / mock / fullmode）
 tools/               开发与诊断脚本（假上游、探针、布局自测）
 scripts → 根目录      build-exe.ps1 / run-bridge.ps1 / stop-bridge.ps1 / start-bridge.cmd

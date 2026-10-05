@@ -32,11 +32,11 @@ sys.path.insert(0, HERE)
 
 # ------------------------------------------------------------------ branding
 APP_NAME = "mcp-hands"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 APP_AUTHOR = "huocai250"
 APP_URL = "https://github.com/huocai250/mcp-hands"
 APP_LICENSE = "MIT"
-APP_TAGLINE = "把手机里的人设接上电脑的 261 个工具"
+APP_TAGLINE = "把手机里的人设接上电脑的 335 个工具，能看图、能读屏幕"
 
 
 def version_line():
@@ -92,6 +92,14 @@ DEFAULT_CONFIG = {
     "max_tool_rounds": 4,
     "upstream_history": "last_user_only",
     "include_client_system": False,
+    "vision": {
+        "base_url": "https://api.deepseek.com/v1",
+        "api_key": "",
+        "model": "deepseek-flash",
+        "detail": "auto",
+        "max_pixels": 1300,
+        "inherit_upstream_key": True,
+    },
     "servers": [
         {"name": "fs", "enabled": True, "env": {"MCP_FS_ROOTS": os.path.expanduser("~")}},
         {"name": "shell", "enabled": True},
@@ -117,6 +125,13 @@ DEFAULT_CONFIG = {
         {"name": "soft", "enabled": True},
         {"name": "registry", "enabled": True},
         {"name": "netadv", "enabled": True},
+        {"name": "vision", "enabled": True},
+        {"name": "files2", "enabled": True},
+        {"name": "calc", "enabled": True},
+        {"name": "notes", "enabled": True},
+        {"name": "pwd", "enabled": True},
+        {"name": "netcheck", "enabled": True},
+        {"name": "office2", "enabled": True},
     ],
 }
 
@@ -174,8 +189,17 @@ def start_hub():
     """Start every configured MCP server on first use (idempotent)."""
     global HUB
     if HUB is None:
+        vision = CFG.get("vision") or {}
+        extra_env = None
+        if vision:
+            extra_env = {"MCP_VISION_BASE_URL": vision.get("base_url", ""),
+                         "MCP_VISION_API_KEY": vision.get("api_key", ""),
+                         "MCP_VISION_MODEL": vision.get("model", ""),
+                         "MCP_VISION_DETAIL": vision.get("detail", ""),
+                         "MCP_VISION_MAX_PIXELS": vision.get("max_pixels", "")}
         HUB = ToolHub(CFG.get("servers", []), cwd=BASE_DIR, log=lambda m: log("  " + m),
-                      entry=None if FROZEN else os.path.join(HERE, "bridge.py"))
+                      entry=None if FROZEN else os.path.join(HERE, "bridge.py"),
+                      extra_env=extra_env)
     return HUB
 
 

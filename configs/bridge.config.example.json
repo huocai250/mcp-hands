@@ -13,6 +13,14 @@
   "max_tool_rounds": 4,
   "upstream_history": "last_user_only",
   "include_client_system": false,
+  "vision": {
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "YOUR_DEEPSEEK_KEY",
+    "model": "deepseek-flash",
+    "detail": "auto",
+    "max_pixels": 1300,
+    "inherit_upstream_key": true
+  },
   "proxy": {
     "enabled": true,
     "listen": { "host": "0.0.0.0", "port": 8890 },
@@ -52,6 +60,13 @@
     { "name": "sched", "enabled": true },
     { "name": "soft", "enabled": true },
     { "name": "registry", "enabled": true },
-    { "name": "netadv", "enabled": true }
+    { "name": "netadv", "enabled": true },
+    { "name": "vision", "enabled": true },
+    { "name": "files2", "enabled": true },
+    { "name": "calc", "enabled": true },
+    { "name": "notes", "enabled": true },
+    { "name": "pwd", "enabled": true },
+    { "name": "netcheck", "enabled": true },
+    { "name": "office2", "enabled": true }
   ]
 }

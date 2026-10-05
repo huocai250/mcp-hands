@@ -24,10 +24,21 @@ FROZEN = bool(getattr(sys, "frozen", False))
 BASE_DIR = os.path.dirname(os.path.abspath(sys.executable)) if FROZEN else os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-CONFIG_PATH = os.environ.get("BRIDGE_CONFIG") or os.path.join(BASE_DIR, "bridge.config.json")
-os.environ["BRIDGE_CONFIG"] = CONFIG_PATH
-
 ARGV = sys.argv[1:]
+
+# Honour an explicit config (--config X or a bare path) instead of always using the
+# machine config next to the executable; otherwise `exe some.config.json --tools`
+# would silently read the wrong file.
+_explicit_config = None
+if "--config" in ARGV:
+    _index = ARGV.index("--config")
+    if _index + 1 < len(ARGV):
+        _explicit_config = ARGV[_index + 1]
+else:
+    _explicit_config = next((a for a in ARGV if not a.startswith("--")), None)
+CONFIG_PATH = os.path.abspath(os.environ.get("BRIDGE_CONFIG") or _explicit_config
+                              or os.path.join(BASE_DIR, "bridge.config.json"))
+os.environ["BRIDGE_CONFIG"] = CONFIG_PATH
 
 if "--mcp-server" in ARGV:
     if FROZEN:
@@ -103,7 +114,8 @@ ABOUT_TEXT = """%(name)s  v%(version)s
 SERVERS = ("fs", "shell", "web", "sys", "office", "media", "archive", "sqlite",
            "desktop", "voice", "monitor", "net", "dev", "forensics",
            "text", "pdf", "qr", "backup", "http", "media2", "sched", "soft",
-           "registry", "netadv")
+           "registry", "netadv", "vision", "files2", "calc", "notes", "pwd",
+           "netcheck", "office2")
 
 
 class _Writer:
@@ -192,6 +204,7 @@ class Console(Tk):
                           ("自检", lambda: self.run_cmd("self-test")),
                           ("体检", lambda: self.run_cmd("doctor")),
                           ("测试对话", self.test_chat),
+                          ("测试视觉", self.test_vision),
                           ("关于", self.show_about)):
             ttk.Button(bar, text=text, command=cmd).pack(side=LEFT, padx=(0, 6))
         ttk.Button(bar, text="清空日志", command=self.clear_log).pack(side=RIGHT)
@@ -269,6 +282,28 @@ class Console(Tk):
                         variable=self.proxy_mode, command=self._update_addr).grid(
             row=len(rows) + 1, column=0, columnspan=2, sticky=W, pady=(6, 0))
 
+        vis = ttk.LabelFrame(body, text="视觉识别（让人设真的看见屏幕/图片）", padding=8)
+        vis.pack(fill=X, pady=(2, 4))
+        vrow = ttk.Frame(vis)
+        vrow.pack(fill=X)
+        ttk.Label(vrow, text="视觉地址").pack(side=LEFT)
+        self.vision_base = StringVar()
+        ttk.Entry(vrow, textvariable=self.vision_base).pack(side=LEFT, fill=X, expand=True, padx=4)
+        ttk.Label(vrow, text="模型").pack(side=LEFT)
+        self.vision_model = StringVar()
+        ttk.Entry(vrow, textvariable=self.vision_model, width=22).pack(side=LEFT, padx=4)
+        ttk.Label(vrow, text="Key").pack(side=LEFT)
+        self.vision_key = StringVar()
+        ttk.Entry(vrow, textvariable=self.vision_key, width=26, show="*").pack(side=LEFT)
+        vrow2 = ttk.Frame(vis)
+        vrow2.pack(fill=X, pady=(4, 0))
+        self.vision_inherit = BooleanVar(value=True)
+        ttk.Checkbutton(vrow2, text="沿用 App 里的上游 key（走 8890 时自动，无需填写）",
+                        variable=self.vision_inherit).pack(side=LEFT)
+        ttk.Button(vrow2, text="测试视觉", command=self.test_vision).pack(side=LEFT, padx=8)
+        ttk.Label(vrow2, text="DeepSeek 的 deepseek-flash 支持图片；留空 Key 就走 App 直连代理自动沿用",
+                  foreground="#888").pack(side=LEFT, padx=6)
+
         tools = ttk.LabelFrame(body, text="启用的工具服务", padding=8)
         tools.pack(fill=X, pady=(2, 4))
         for index, name in enumerate(SERVERS):
@@ -286,6 +321,25 @@ class Console(Tk):
         version.bind("<Button-1>", lambda _e: webbrowser.open(bridge.APP_URL))
         self._load_config_into_ui()
         self.after(300, self._init_sash)
+
+    def test_vision(self):
+        """Call the vision server's probe tool through the running hub."""
+        if not self.server and bridge.HUB is None:
+            messagebox.showinfo("提示", "先点「启动」，再测试视觉")
+            return
+        self.say("正在测试视觉（会发一张 96x96 小图给视觉模型）…")
+
+        def worker():
+            hub = bridge.start_hub()
+            started = time.time()
+            out, err = hub.call("vision_vision_probe", {})
+            if err:
+                self.say("视觉测试失败：%s" % out.splitlines()[0][:300])
+                self.say("排查：走 8890 时 App 的 key 会自动沿用；否则请在下面填 DeepSeek key，或确认 model=deepseek-flash")
+            else:
+                self.say("视觉测试通过（%.1fs）：%s" % (time.time() - started, out.replace("\n", " | ")))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def show_about(self):
         """作者 / 仓库 / 协议 信息，链接可点。"""
@@ -383,6 +437,11 @@ class Console(Tk):
         self.proxy_enabled.set(bool(prox.get("enabled", False)))
         self.proxy_port.set(str((prox.get("listen") or {}).get("port", 8890)))
         self.proxy_upstream.set(prox.get("upstream_base") or "https://api.deepseek.com/v1")
+        vision = self.config.get("vision") or {}
+        self.vision_base.set(vision.get("base_url") or "https://api.deepseek.com/v1")
+        self.vision_model.set(vision.get("model") or "deepseek-flash")
+        self.vision_key.set(vision.get("api_key") or "")
+        self.vision_inherit.set(bool(vision.get("inherit_upstream_key", True)))
         enabled = {s.get("name") for s in self.config.get("servers", []) if s.get("enabled", True) is not False}
         for name, var in self.server_vars.items():
             var.set(name in enabled)
@@ -585,6 +644,13 @@ class Console(Tk):
         prox.setdefault("tool_models", ["deepseek-flash", "deepseek-chat", "deepseek-reasoner"])
         prox.setdefault("max_tool_rounds", 6)
         prox.setdefault("inject_tool_hint", True)
+        vision = cfg.setdefault("vision", {})
+        vision["base_url"] = self.vision_base.get().strip() or "https://api.deepseek.com/v1"
+        vision["model"] = self.vision_model.get().strip() or "deepseek-flash"
+        vision["api_key"] = self.vision_key.get().strip()
+        vision["inherit_upstream_key"] = bool(self.vision_inherit.get())
+        vision.setdefault("detail", "auto")
+        vision.setdefault("max_pixels", 1300)
         by_name = {s["name"]: s for s in cfg.get("servers", [])}
         for name, var in self.server_vars.items():
             by_name.setdefault(name, {"name": name})["enabled"] = bool(var.get())

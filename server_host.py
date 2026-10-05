@@ -11,7 +11,8 @@ SERVERS = (
     "fs", "shell", "web", "sys", "office", "media", "archive", "sqlite",
     "desktop", "voice", "monitor", "net", "dev", "forensics",
     "text", "pdf", "qr", "backup", "http", "media2", "sched", "soft",
-    "registry", "netadv",
+    "registry", "netadv", "vision", "files2", "calc", "notes", "pwd",
+    "netcheck", "office2",
 )
 
 # Tools whose sample call needs no arguments beyond these defaults, used by --self-test.

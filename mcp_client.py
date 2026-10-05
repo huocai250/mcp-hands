@@ -143,14 +143,16 @@ class McpServer:
 class ToolHub:
     """Owns every MCP server and exposes a flat, model-friendly tool namespace."""
 
-    def __init__(self, server_configs, cwd=None, log=print, entry=None):
+    def __init__(self, server_configs, cwd=None, log=print, entry=None, extra_env=None):
         """entry: path to bridge.py so children can re-enter as `--mcp-server NAME`;
-        None when frozen (sys.executable is the bundle itself)."""
+        None when frozen (sys.executable is the bundle itself).
+        extra_env: variables handed to every child (e.g. MCP_VISION_* from the config)."""
         self.log = log
         self.servers = []
         self.aliases = {}
         self.specs = []
         self.entry = entry
+        self.extra_env = {k: str(v) for k, v in (extra_env or {}).items() if v not in (None, "")}
         self._start_all(server_configs, cwd)
 
     def _argv_for(self, raw, cwd):
@@ -176,6 +178,8 @@ class ToolHub:
         def boot(raw):
             env = dict(raw.get("env", {}))
             env.setdefault("MCP_SAMPLES_DIR", cwd or os.getcwd())
+            for key, value in self.extra_env.items():
+                env.setdefault(key, value)
             cfg = {"name": raw["name"], "argv": self._argv_for(raw, cwd), "env": env,
                    "cwd": raw.get("cwd", cwd), "timeout": raw.get("timeout", 60)}
             return raw, McpServer(**cfg).start()

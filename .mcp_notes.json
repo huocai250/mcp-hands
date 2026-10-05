@@ -1,0 +1,62 @@
+{
+  "notes": [
+    {
+      "id": "n1",
+      "title": "self-test note",
+      "body": "first line\nsecond line\nappended line",
+      "tags": [
+        "selftest",
+        "memory"
+      ],
+      "source": "mcp_notes",
+      "created": "2026-10-05T15:25:15+08:00",
+      "updated": "2026-10-05T15:25:15+08:00"
+    },
+    {
+      "id": "n2",
+      "title": "self-test note",
+      "body": "first line\nsecond line\nappended line",
+      "tags": [
+        "selftest",
+        "memory"
+      ],
+      "source": "mcp_notes",
+      "created": "2026-10-05T15:31:39+08:00",
+      "updated": "2026-10-05T15:31:39+08:00"
+    }
+  ],
+  "todos": [
+    {
+      "id": "t1",
+      "text": "self-test todo",
+      "due": "2025-01-01",
+      "priority": "normal",
+      "status": "done",
+      "created": "2026-10-05T15:25:15+08:00",
+      "done_at": "2026-10-05T15:25:15+08:00"
+    },
+    {
+      "id": "t2",
+      "text": "self-test todo",
+      "due": "2025-01-01",
+      "priority": "normal",
+      "status": "done",
+      "created": "2026-10-05T15:31:39+08:00",
+      "done_at": "2026-10-05T15:31:39+08:00"
+    }
+  ],
+  "log": [
+    {
+      "id": "l1",
+      "kind": "session",
+      "text": "mcp_notes self-test ran",
+      "created": "2026-10-05T15:25:15+08:00"
+    },
+    {
+      "id": "l2",
+      "kind": "session",
+      "text": "mcp_notes self-test ran",
+      "created": "2026-10-05T15:31:39+08:00"
+    }
+  ]
+}

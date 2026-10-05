@@ -13,6 +13,14 @@
   "max_tool_rounds": 4,
   "upstream_history": "last_user_only",
   "include_client_system": false,
+  "vision": {
+    "base_url": "http://127.0.0.1:8894/v1",
+    "api_key": "mock-key",
+    "model": "mock-vision",
+    "detail": "auto",
+    "max_pixels": 1300,
+    "inherit_upstream_key": false
+  },
   "proxy": {
     "enabled": false,
     "listen": { "host": "127.0.0.1", "port": 8892 },
@@ -52,6 +60,13 @@
     { "name": "sched", "enabled": true },
     { "name": "soft", "enabled": true },
     { "name": "registry", "enabled": true },
-    { "name": "netadv", "enabled": true }
+    { "name": "netadv", "enabled": true },
+    { "name": "vision", "enabled": true },
+    { "name": "files2", "enabled": true },
+    { "name": "calc", "enabled": true },
+    { "name": "notes", "enabled": true },
+    { "name": "pwd", "enabled": true },
+    { "name": "netcheck", "enabled": true },
+    { "name": "office2", "enabled": true }
   ]
 }
