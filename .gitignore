@@ -11,12 +11,25 @@ __pycache__/
 
 # runtime state (machine specific)
 bridge.config.json
+bridge.config.json.*
 bridge.log
+bridge.log.*
 proxy.log
 gui-settings.json
+devices.json
 .aiyu_selftest/
 .aiyu_self_samples/
 *.zip
+
+# databases and backups of them: these hold the user's jobs, plans and audit trail
+*.db
+*.db.*
+*.sqlite
+*.sqlite3
+*.before-restore
+outbox/
+backup-*/
+mcp-hands-backup-*.zip
 
 # editors / os
 .vscode/
