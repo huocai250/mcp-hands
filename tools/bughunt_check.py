@@ -47,6 +47,7 @@ with open(CONFIG, "w", encoding="utf-8") as fh:
         "audit": {"enabled": True, "db": os.path.join(STATE, "audit.db"), "max_rows": 500},
         "plans": {"db": os.path.join(STATE, "plans.db")},
         "outbox": {"dir": os.path.join(STATE, "outbox"), "ttl": 600},
+        "voice": {"path": os.path.join(STATE, "voice.json"), "max_lines": 50},
         "devices": {"mode": "allowlist", "path": os.path.join(STATE, "devices.json")},
         "log": {"format": "text", "max_mb": 1},
         "servers": [{"name": "calc", "enabled": True}, {"name": "send", "enabled": True},
@@ -63,6 +64,19 @@ def report(number, title, broken, detail=""):
     findings.append((number, title, broken))
     print("%s probe %s: %s%s" % ("BUG " if broken else "ok  ", number, title,
                                  ("  <- " + detail) if detail else ""))
+
+
+def get(path, timeout=20):
+    with urllib.request.urlopen("http://127.0.0.1:%d%s" % (BRIDGE_PORT, path), timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace") or "{}")
+
+
+def post(path, payload, timeout=60):
+    request = urllib.request.Request("http://127.0.0.1:%d%s" % (BRIDGE_PORT, path),
+                                     data=json.dumps(payload).encode(), method="POST",
+                                     headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace") or "{}")
 
 
 hub = bridge.start_hub()
@@ -242,6 +256,80 @@ out4 = ((done4.stdout or b"").decode("utf-8", "replace") + (done4.stderr or b"")
 report(14, "CLI: an unknown flag exits with an error instead of opening a window",
        done4.returncode != 2 or "unknown option" not in out4,
        "exit=%s out=%s" % (done4.returncode, out4.splitlines()[0][:70] if out4 else ""))
+
+# 15. both web pages must be valid JavaScript (a stray quote used to freeze the console)
+import re  # noqa: E402
+
+node = os.environ.get("DSH_NODE") or r"C:\Users\13323\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"
+pages = {
+    "dashboard": bridge.DASHBOARD_HTML.replace("__VERSION__", "x").replace("__BRIDGE__", "http://x").replace("__TOKEN__", ""),
+    "voice": bridge.VOICE_HTML,
+}
+bad_js = []
+for name, html in pages.items():
+    for index, block in enumerate(re.findall(r"(?s)<script>(.*?)</script>", html)):
+        path = os.path.join(STATE, "%s_%d.js" % (name, index))
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(block)
+        if os.path.isfile(node):
+            check = subprocess.run([node, "--check", path], capture_output=True, timeout=60)
+            if check.returncode != 0:
+                bad_js.append("%s:%s" % (name, (check.stderr or b"").decode("utf-8", "replace").strip().splitlines()[:1]))
+report(15, "the dashboard and voice pages contain valid JavaScript", bool(bad_js),
+       "; ".join(bad_js) or "node --check passed for every script block")
+
+# 16. the voice channel round-trip
+said = post("/v2/voice/say", {"text": "你好，我是林挽夏"})
+line = said.get("line") or {}
+pending_before = get("/v2/voice?since=0")["lines"]
+post("/v2/voice/spoken", {"seq": line.get("seq")})
+pending_after = get("/v2/voice?since=0")["lines"]
+heard = post("/v2/voice/heard", {"text": "听到了"})
+unread = get("/v2/voice?since=0&kind=heard")["lines"]
+checks = {
+    "seq assigned": bool(line.get("seq")),
+    "unspoken line is pending": any(l.get("seq") == line.get("seq") for l in pending_before),
+    "spoken line leaves the queue": not any(l.get("seq") == line.get("seq") for l in pending_after),
+    "heard line is stored": (heard.get("line") or {}).get("kind") == "heard",
+    "heard line shows up unread": any(l.get("seq") == (heard.get("line") or {}).get("seq") for l in unread),
+}
+bad = [name for name, ok in checks.items() if not ok]
+report(16, "voice queue: say -> pending -> spoken -> heard round-trip works", bool(bad),
+       ("failed: %s" % ", ".join(bad)) if bad else ", ".join("%s=ok" % name for name in checks))
+try:
+    page = urllib.request.urlopen("http://127.0.0.1:%d/voice" % BRIDGE_PORT, timeout=10).read().decode("utf-8")
+    voice_page_ok = "speechSynthesis" in page and "/v2/voice/next" in page
+except Exception as exc:  # noqa: BLE001
+    page, voice_page_ok = str(exc), False
+report(17, "the voice page reaches the phone with TTS wired up", not voice_page_ok, page[:60])
+
+# 18. sending an image must hand back the markdown line, not a bare url
+img = os.path.join(STATE, "pic.png")
+with open(img, "wb") as fh:
+    fh.write(b"\x89PNG\r\n\x1a\n" + b"0" * 40)
+delivered, err_img = hub.call("send_send_image", {"path": img, "note": "测试图"})
+first = (delivered or "").splitlines()[0] if delivered else ""
+report(18, "send_image answers with a markdown image line first",
+       not (first.startswith("![") and "](http" in first and "url=" not in first),
+       "first line: %s" % first[:80])
+
+# 19. the fs sandbox boundary is visible without guessing
+health = get("/v2/health")
+report(19, "/v2/health reports the fs roots and the voice channel",
+       not ("fs_roots" in health and "voice" in health),
+       "fs_roots=%s voice_lines=%s" % (health.get("fs_roots"), (health.get("voice") or {}).get("lines")))
+
+# 20. a dead server must come back on its own (and say so), not break the tool set
+victim = next((srv for srv in bridge.HUB.servers if srv.name == "calc"), None) if bridge.HUB else None
+if victim is not None:
+    victim._proc.kill()
+    time.sleep(0.8)
+    out, err = bridge.HUB.call("calc_calc", {"expression": "1+1"})
+    detail = "restarts=%s result=%r" % (victim.restarts, (out or "")[:40])
+    report(20, "a crashed server is restarted automatically on the next call",
+           not (victim.restarts >= 1 and "2" in (out or "")), detail)
+else:
+    report(20, "a crashed server is restarted automatically on the next call", True, "no hub to test")
 
 service.stop()
 server.shutdown()

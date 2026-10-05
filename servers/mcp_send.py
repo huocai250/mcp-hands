@@ -60,15 +60,22 @@ def _deliver(path, kind, note="", ttl=0, once=False, label="", cleanup=False):
         return "could not deliver %s: %s" % (label or path, error)
     item = data.get("item") or {}
     url = item.get("url") or ""
+    if kind in ("image", "qr"):
+        # 4.1: lead with the markdown line and keep the raw URL out of the way. The model
+        # used to echo "url=…" as chat text, which shows up as an ugly unclickable link
+        # instead of the picture.
+        return ("![%s](%s)\n"
+                "把上面这一行（从 ! 到右括号）整行原样发出去，客户端就会直接显示图片。\n"
+                "不要发 url=、不要发“发送成功”之类的回执、不要改这一行。\n"
+                "(内部信息，给机器看的: kind=%s bytes=%s id=%s)"
+                % (note or "图片", url, item.get("kind"), item.get("bytes"), item.get("id")))
     lines = ["delivered %s" % (label or item.get("name") or path),
              "kind=%s bytes=%s expires_in=%ss" % (item.get("kind"), item.get("bytes"),
                                                   int(float(item.get("expires") or 0) - __import__("time").time())),
              "url=%s" % url]
-    if kind in ("image", "qr"):
-        lines.append("markdown=![%s](%s)" % (note or "media", url))
-        lines.append("tell the user=把上面的 markdown 行原样发出来，客户端会直接显示图片")
-    elif kind == "audio":
-        lines.append("tell the user=让用户点开这个链接就能听到你说的话（手机同一个 WiFi）")
+    if kind == "audio":
+        lines.append("tell the user=如果用户开着语音页（/voice），直接用 call_say 让她说话更好；"
+                     "这份音频文件只是备份，把链接给用户即可")
     else:
         lines.append("tell the user=把链接给用户，他点开就能拿到文件")
     return "\n".join(lines)

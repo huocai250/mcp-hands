@@ -250,6 +250,7 @@ class Console(Tk):
                           ("后台任务", self.show_jobs),
                           ("设备", lambda: self.run_cmd("devices")),
                           ("媒体出口", lambda: self.run_cmd("outbox")),
+                          ("语音通话页", self.open_voice),
                           ("网页控制台", self.open_dashboard),
                           ("关于", self.show_about)):
             ttk.Button(bar, text=text, command=cmd).pack(side=LEFT, padx=(0, 6))
@@ -380,6 +381,16 @@ class Console(Tk):
         port = self.fields["port"].get().strip() or "8877"
         webbrowser.open("http://127.0.0.1:%s/dashboard" % port)
         self.say("已在浏览器打开网页控制台：http://127.0.0.1:%s/dashboard（服务未运行时页面会显示离线）" % port)
+
+    def open_voice(self):
+        """4.1: the voice-call page - open it on the phone so she can speak out loud."""
+        try:
+            url = bridge.proxy_public_base().rstrip("/") + "/voice"
+        except Exception:  # noqa: BLE001
+            url = "http://127.0.0.1:8890/voice"
+        webbrowser.open(url)
+        self.say("语音通话页：%s\n在**手机**浏览器里打开这个地址，点「开始通话」，她就能说话了（手机自己发声）。"
+                 "这里也开了一个，方便你在这台电脑上试。" % url)
 
     def show_jobs(self):
         """后台任务面板（2.0）：看队列和结果。"""

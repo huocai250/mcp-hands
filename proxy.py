@@ -118,7 +118,9 @@ TOOL_HINT = """你在操作一台真实的 Windows 电脑，下面这些工具�
 
 【7 主动开口】你不能主动在手机 App 里发消息（App 没有推送通道），也绝不许谎称你发过。要主动找用户就走电脑通道：立刻提醒用 sys_toast 或 voice_toast_speak（后者会念出来）；定时提醒用 remind_in(minutes=数字, text="要说的话") 或 remind_at(time="18:30", text="...")；查已排的提醒用 remind_list。
 
-【9 给用户看图/听声/拿文件】要给人看画面直接调 send_screen（截屏→上传→返回链接），要看某张图用 send_image，要把一段话说出来用 send_voice，要交文件用 send_file，要给链接或口令用 send_qr。把返回里的 markdown 行/url 原样发出来即可（多数客户端会直接显示图片；音频与文件点开就能用）。不要自己手搓文件服务器、也不要只丢一个裸路径。
+【9 给用户看图/听声/拿文件】发图就用 send_screen（截屏）/ send_image，工具会返回一行 `![说明](链接)`：**把那一行整行原样发出去**，客户端就直接显示图片。**绝不要发 url=、不要发「send_x 成功」这类回执、不要把链接单独贴出来**——用户看到的是打不开的一串字符，不是图。要交文件用 send_file，长文本用 send_text，二维码用 send_qr。
+
+【9b 语音通话】她实际上是可以「出声」的：让用户（一次）在手机浏览器打开 {voice_url} 点「开始通话」，之后你调 call_say 说的话会由**手机自己**念出来（不需要用户点链接、不需要音频文件）；用户在语音页里说的话，你用 call_listen 就能读到。所以：想说话就 call_say，不要发语音文件的链接；每一轮开始时如果有通话在进行，先 call_listen 看用户说了什么，再 call_say 回他。通话不在进行中（call_state 显示没连过）就提醒用户打开那个页面。
 
 【10 计划的验证】计划里标了「需要验证」的步骤，plan_done 必须带上 verify_evidence（用一次**新的**工具读取作为证据，例如重新列一次目录确认文件真的在），否则系统会拒绝。步骤失败时先换策略重试（换工具/换参数/换顺序），不要只解释原因。
 
@@ -459,7 +461,8 @@ def run_tool_loop(body, auth, on_event=None, profile_name="", profile_cfg=None):
     if proxy_cfg().get("inject_tool_hint", True):
         cfg_now = proxy_cfg()
         hint = TOOL_HINT % {"rounds": int(cfg_now.get("max_tool_rounds", 12) or 12),
-                            "seconds": int(float(cfg_now.get("max_seconds", 120) or 120))}
+                            "seconds": int(float(cfg_now.get("max_seconds", 120) or 120)),
+                            "voice_url": "%s/voice" % bridge.proxy_public_base()}
         hint += "\n" + vision_status_line(auth)
         hint += ("\n【8b 后台任务】长活（翻一整轮推荐流、批量处理一堆文件、盯着某个目录）"
                  "用 job_start 丢给电脑自己跑，别占着这一轮等：派出去之后先回用户一句，"
@@ -734,6 +737,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/out/"):
             bridge.serve_outbox(self, self.path[len("/out/"):].split("?")[0])
             return
+        # 4.1: the voice-call page lives here as well, so the phone can open it.
+        if self.path.startswith("/voice"):
+            bridge.serve_voice_page(self)
+            return
+        if self.path.startswith("/v2/voice"):
+            bridge.voice_api(self, "GET")
+            return
         if "models" in self.path:
             models = list(proxy_cfg().get("tool_models") or [])
             try:
@@ -755,6 +765,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._json({"error": {"message": "not found"}}, 404)
 
     def do_POST(self):
+        # 4.1: the phone posts what it heard (and what it spoke) here.
+        if self.path.startswith("/v2/voice"):
+            bridge.voice_api(self, "POST")
+            return
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b"{}"
         try:

@@ -35,12 +35,12 @@ sys.path.insert(0, HERE)
 
 # ------------------------------------------------------------------ branding
 APP_NAME = "mcp-hands"
-APP_VERSION = "4.0.1"
+APP_VERSION = "4.1.0"
 APP_AUTHOR = "huocai250"
 APP_URL = "https://github.com/huocai250/mcp-hands"
 APP_REPO = "huocai250/mcp-hands"
 APP_LICENSE = "MIT"
-APP_TAGLINE = "把手机里的人设接上电脑的 376 个工具：有嘴有身份、能干长活、能被审计"
+APP_TAGLINE = "把手机里的人设接上电脑的 380 个工具：会看图、能出声、能干长活、能被审计"
 
 
 def version_line():
@@ -72,6 +72,7 @@ from jobs import JobRunner, JobStore  # noqa: E402
 from mcp_client import ToolHub  # noqa: E402
 from outbox import Outbox  # noqa: E402
 from plans import PlanStore  # noqa: E402
+from voice import VoiceQueue  # noqa: E402
 
 
 #: Flags whose *next* token is a value, not a file to talk to.
@@ -172,7 +173,7 @@ async function tick(){
   let dh="<table><tr><th>状态</th><th>id</th><th>名称/密钥</th><th>最近</th><th>调用</th><th>操作</th></tr>";
   dh+=(dev.devices||[]).map(d=>`<tr><td class="ok">已批准</td><td>${esc(d.id)}</td><td>${esc(d.name)} <span class="dim">${esc(d.masked||'')}</span></td><td class="dim">${d.last_seen?new Date(d.last_seen*1000).toLocaleTimeString():'-'}</td><td>${d.calls||0}</td><td><button onclick="act('revoke','${d.id}')">撤销</button></td></tr>`).join("");
   dh+=(dev.pending||[]).map(p=>`<tr><td class="bad">待批准</td><td>${esc(p.id)}</td><td>${esc(p.masked||'')} <span class="dim">${esc(p.ip||'')}</span></td><td class="dim">${p.seen||1} 次尝试</td><td>-</td><td><button onclick="act('approve','${p.id}')">批准</button> <button onclick="act('reject','${p.id}')">拒绝</button></td></tr>`).join("");
-  document.getElementById("devices").innerHTML=dh+"</table><div class=\"dim\">mode="+esc(dev.mode)+"（off=不校验，allowlist=只允许已批准设备）</div>";
+  document.getElementById("devices").innerHTML=dh+"</table><div class='dim'>mode="+esc(dev.mode)+"（off=不校验，allowlist=只允许已批准设备）</div>";
   const box=await j("/v2/outbox?limit=8");
   document.getElementById("outbox").innerHTML="<table><tr><th>id</th><th>类型</th><th>名称</th><th>大小</th><th>取用</th><th>链接</th></tr>"+
     (box.items||[]).map(o=>`<tr><td>${esc(o.id)}</td><td>${esc(o.kind)}</td><td>${esc(o.name)}</td><td>${o.bytes}</td><td>${o.fetches||0}</td><td><a href="${esc(o.url)}" target="_blank">打开</a></td></tr>`).join("")+"</table>";
@@ -213,6 +214,7 @@ DEFAULT_CONFIG = {
     "memory": {"auto_index": True},
     "outbox": {"dir": "", "ttl": 3600, "max_items": 200, "secret": ""},
     "devices": {"mode": "off", "path": "", "salt": ""},
+    "voice": {"path": "", "max_lines": 200},
     "control": {"token": "", "require_for_lan": True},
     "plans": {"db": ""},
     "audit": {"enabled": True, "db": "", "max_rows": 20000},
@@ -258,6 +260,7 @@ DEFAULT_CONFIG = {
         {"name": "audit", "enabled": True},
         {"name": "send", "enabled": True},
         {"name": "device", "enabled": True},
+        {"name": "call", "enabled": True},
     ],
 }
 
@@ -382,6 +385,7 @@ def load_config():
     cfg["outbox"].setdefault("ttl", 3600)
     cfg["outbox"].setdefault("max_items", 200)
     cfg.setdefault("devices", {}).setdefault("mode", "off")
+    cfg.setdefault("voice", {}).setdefault("max_lines", 200)
     return cfg
 
 
@@ -423,10 +427,11 @@ MIGRATIONS = {
     "outbox.ttl": 3600,
     "outbox.max_items": 200,
     "devices.mode": "off",
+    "voice.max_lines": 200,
     "control.token": "",
     "control.require_for_lan": True,
 }
-NEW_SERVERS = ("jobs", "memory", "plan", "audit", "send", "device")
+NEW_SERVERS = ("jobs", "memory", "plan", "audit", "send", "device", "call")
 
 
 def migrate_config(path=None):
@@ -468,6 +473,7 @@ _POLICY = None
 _PLANS = None
 _OUTBOX = None
 _DEVICES = None
+_VOICE = None
 
 
 def audit_store():
@@ -1217,6 +1223,16 @@ def openai_response(text, model, steps):
     }
 
 
+def voice_queue():
+    """4.1: the voice-call channel (outbound lines to speak, inbound speech to read)."""
+    global _VOICE
+    if _VOICE is None:
+        cfg = CFG.get("voice") or {}
+        _VOICE = VoiceQueue(cfg.get("path") or os.path.join(BASE_DIR, "voice.json"),
+                            max_lines=cfg.get("max_lines") or 200)
+    return _VOICE
+
+
 def lan_ips():
     """Plausible LAN IPv4 addresses, best first (private ranges beat virtual adapters)."""
     import socket
@@ -1280,6 +1296,79 @@ def client_host(fresh_seconds=300):
     return _LAST_HOST["host"]
 
 
+def proxy_public_base():
+    """The URL the phone should use for pages served by the proxy (voice, outbox)."""
+    seen = client_host()
+    if seen:
+        return "http://%s" % seen
+    proxy = CFG.get("proxy") or {}
+    return "http://%s:%s" % (lan_ip(), (proxy.get("listen") or {}).get("port", 8890))
+
+
+def voice_api(handler, method):
+    """The voice endpoints, shared by the bridge and by the phone-facing proxy."""
+    if not control_ok(handler):
+        handler._json({"error": {"message": "voice API needs the X-Control-Token header (or ?token=…)",
+                                 "type": "control_token_required"}}, 401)
+        return
+    parsed = urllib.parse.urlsplit(handler.path)
+    query = urllib.parse.parse_qs(parsed.query)
+    tail = parsed.path[len("/v2/voice"):].strip("/")
+    body = {}
+    if method != "GET":
+        try:
+            raw = handler.rfile.read(int(handler.headers.get("Content-Length") or 0)) or b"{}"
+            body = json.loads(raw.decode("utf-8", "replace") or "{}")
+        except (ValueError, json.JSONDecodeError):
+            body = {}
+    if method == "GET" or not tail:
+        lines = voice_queue().pending(since=int(query.get("since", ["0"])[0]),
+                                      kind=query.get("kind", ["say"])[0])
+        handler._json({"lines": lines, "stats": voice_queue().stats()})
+        return
+    if tail == "say":
+        line = voice_queue().say(body.get("text", ""), voice=body.get("voice", ""),
+                                 rate=body.get("rate", 1.0), interrupt=body.get("interrupt", False))
+        handler._json({"line": line, "stats": voice_queue().stats()})
+        return
+    if tail == "heard":
+        line = voice_queue().heard(body.get("text", ""), source=body.get("source", "phone"))
+        log("voice: the user said %r" % (body.get("text", "")[:80]))
+        handler._json({"line": line})
+        return
+    if tail == "spoken":
+        handler._json({"ok": voice_queue().mark_spoken(body.get("seq", 0)),
+                       "stats": voice_queue().stats()})
+        return
+    if tail == "read":
+        handler._json({"ok": voice_queue().mark_read(body.get("seq", 0)),
+                       "stats": voice_queue().stats()})
+        return
+    if tail == "call":
+        voice_queue().call_event(body.get("event", ""), body.get("note", ""))
+        handler._json({"stats": voice_queue().stats()})
+        return
+    if tail == "clear":
+        handler._json({"cleared": voice_queue().clear()})
+        return
+    handler._json({"error": {"message": "unknown voice action"}}, 404)
+
+
+def serve_voice_page(handler):
+    if not control_ok(handler):
+        handler._json({"error": {"message": "voice page needs ?token=… (see the bridge log), "
+                                            "because the bridge is reachable on the LAN",
+                                 "type": "control_token_required"}}, 401)
+        return
+    body = VOICE_HTML.encode("utf-8")
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
 def serve_outbox(handler, token):
     """Serve one signed outbox item; shared by the bridge and the proxy handlers."""
     record, target = outbox().resolve(urllib.parse.unquote(token or ""))
@@ -1309,6 +1398,91 @@ def serve_outbox(handler, token):
     handler.send_header("Cache-Control", "no-store")
     handler.end_headers()
     handler.wfile.write(blob)
+
+
+VOICE_HTML = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>mcp-hands 语音通话</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+ body{margin:0;background:#0f1115;color:#e6e6e6;font:15px/1.6 "Segoe UI",system-ui,sans-serif;display:flex;flex-direction:column;height:100vh}
+ header{padding:12px 16px;border-bottom:1px solid #23262e;display:flex;gap:10px;align-items:center}
+ h1{font-size:16px;margin:0;flex:1}
+ .dim{color:#8b93a1;font-size:12px}
+ main{flex:1;overflow:auto;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+ .line{max-width:82%;padding:8px 12px;border-radius:12px;background:#1b2130;white-space:pre-wrap}
+ .mine{align-self:flex-end;background:#3a2b3f}
+ .dimline{opacity:.7;font-size:13px;background:none;padding:2px 0}
+ footer{padding:10px 12px;border-top:1px solid #23262e;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+ button{background:#2b3245;color:#e6e6e6;border:1px solid #3a4256;border-radius:10px;padding:10px 14px;font-size:15px}
+ button.rec{background:#5c1f2b;border-color:#8a2f3d}
+ input{flex:1;min-width:140px;background:#151922;color:#e6e6e6;border:1px solid #2b3245;border-radius:10px;padding:10px}
+ #status{font-size:12px;color:#8b93a1}
+</style></head><body>
+<header><h1>语音通话</h1><span id="status" class="dim">未开始</span></header>
+<main id="log"></main>
+<footer>
+  <button id="start">开始通话</button>
+  <button id="talk">按住说话</button>
+  <input id="text" placeholder="也可以打字，回车发给她">
+  <button id="stop">停止朗读</button>
+</footer>
+<script>
+const API=(location.protocol==="http:"?location.origin:"http://127.0.0.1:8890");
+const TOKEN=new URLSearchParams(location.search).get("token")||"";
+const H={"Content-Type":"application/json"};
+if(TOKEN){H["X-Control-Token"]=TOKEN;}
+let since=0, started=false, speaking=false, rec=null, mode="";
+const log=document.getElementById("log"), status=document.getElementById("status");
+function add(text,cls){const d=document.createElement("div");d.className="line "+(cls||"");d.textContent=text;log.appendChild(d);log.scrollTop=log.scrollHeight;}
+async function api(path,body){const o={method:body?"POST":"GET",headers:H};if(body){o.body=JSON.stringify(body);}try{const r=await fetch(API+path,o);return r.ok?await r.json():{};}catch(e){return {};}}
+function pickVoice(){const vs=speechSynthesis.getVoices()||[];return vs.find(v=>/zh[-_]?CN/i.test(v.lang))||vs.find(v=>/^zh/i.test(v.lang))||null;}
+function speak(text,rate){
+  if(!("speechSynthesis" in window)){add("（这台设备不支持朗读）","dimline");return;}
+  const u=new SpeechSynthesisUtterance(text);const v=pickVoice();
+  if(v){u.voice=v;}u.lang=(v&&v.lang)||"zh-CN";u.rate=rate||1;
+  u.onstart=()=>{speaking=true;};u.onend=()=>{speaking=false;};
+  speechSynthesis.speak(u);
+}
+async function tick(){
+  if(!started){return;}
+  const data=await api("/v2/voice/next?since="+since);
+  (data.lines||[]).forEach(l=>{
+    since=Math.max(since,l.seq||0);
+    if(l.interrupt&&window.speechSynthesis){speechSynthesis.cancel();}
+    add("她说："+l.text,"");
+    speak(l.text,l.rate);
+    api("/v2/voice/spoken",{seq:l.seq});
+  });
+  status.textContent="通话中 · 已收 "+(data.lines||[]).length+" 句"+(speaking?" · 正在说":"");
+}
+function listen(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){add("（这台设备不支持语音识别，可以打字）","dimline");return;}
+  rec=new SR();rec.lang="zh-CN";rec.continuous=true;rec.interimResults=false;
+  rec.onresult=e=>{const r=e.results[e.results.length-1];if(r.isFinal){const t=r[0].transcript.trim();if(t){add("我说："+t,"mine");api("/v2/voice/heard",{text:t});}}};
+  rec.onerror=e=>{add("（识别出错："+e.error+"）","dimline");};
+  rec.onend=()=>{if(mode==="listen"){try{rec.start();}catch(e){}}};
+  try{rec.start();mode="listen";}catch(e){}
+}
+document.getElementById("start").onclick=async()=>{
+  started=true;
+  if(window.speechSynthesis){speechSynthesis.getVoices();}
+  speak("通话已接通",1);
+  await api("/v2/voice/call",{event:"start"});
+  add("（已接通：她想说话时会自动念出来；点「按住说话」可以对她讲）","dimline");
+};
+document.getElementById("talk").onclick=()=>{
+  if(mode==="listen"){mode="";try{rec.stop();}catch(e){}const b=document.getElementById("talk");b.className="";add("（停止收音）","dimline");}
+  else{document.getElementById("talk").className="rec";add("（开始收音，再点一次停止）","dimline");listen();}
+};
+document.getElementById("stop").onclick=()=>{if(window.speechSynthesis){speechSynthesis.cancel();}};
+document.getElementById("text").onkeydown=e=>{
+  if(e.key==="Enter"&&e.target.value.trim()){const t=e.target.value.trim();e.target.value="";add("我说："+t,"mine");api("/v2/voice/heard",{text:t});}
+};
+setInterval(tick,2000);tick();
+</script></body></html>
+"""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1390,11 +1564,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         store = job_store()
         if route in ("health", ""):
+            fs_entry = next((s for s in (CFG.get("servers") or []) if s.get("name") == "fs"), {})
             self._json({"ok": True, "version": APP_VERSION, "uptime_s": int(time.time() - STARTED_AT),
                         "jobs": store.stats(), "plans": plan_store().stats(),
                         "audit": audit_store().stats(), "metrics": METRICS,
                         "policy": policy().describe(),
                         "outbox": outbox().stats(),
+                        "voice": voice_queue().stats(),
+                        "fs_roots": str((fs_entry.get("env") or {}).get("MCP_FS_ROOTS") or "(user home)"),
                         "devices": dict(device_store().stats(), mode=devices_mode()),
                         "profiles": profile_names(),
                         "servers": len(HUB.specs) if HUB else 0})
@@ -1413,6 +1590,11 @@ class Handler(BaseHTTPRequestHandler):
                 if str(query.get("stats", ["0"])[0]) in ("1", "true", "yes"):
                     payload["pending"] = store.pending()
             self._json(payload)
+            return
+        if route == "voice":
+            lines = voice_queue().pending(since=int(query.get("since", ["0"])[0]),
+                                          kind=query.get("kind", ["say"])[0])
+            self._json({"lines": lines, "stats": voice_queue().stats()})
             return
         if route == "outbox":
             items = outbox().list(limit=int(query.get("limit", ["20"])[0]))
@@ -1535,6 +1717,27 @@ class Handler(BaseHTTPRequestHandler):
                                   "type": "control_token_required"}}, 401)
             return
         body = self._read_body()
+        if route == "voice/say":
+            line = voice_queue().say(body.get("text", ""), voice=body.get("voice", ""),
+                                     rate=body.get("rate", 1.0), interrupt=body.get("interrupt", False))
+            self._json({"line": line, "stats": voice_queue().stats()})
+            return
+        if route == "voice/heard":
+            line = voice_queue().heard(body.get("text", ""), source=body.get("source", "phone"))
+            log("voice: user said %r" % (body.get("text", "")[:80]))
+            self._json({"line": line})
+            return
+        if route == "voice/spoken":
+            self._json({"ok": voice_queue().mark_spoken(body.get("seq", 0)),
+                        "stats": voice_queue().stats()})
+            return
+        if route == "voice/call":
+            voice_queue().call_event(body.get("event", ""), body.get("note", ""))
+            self._json({"stats": voice_queue().stats()})
+            return
+        if route == "voice/clear":
+            self._json({"cleared": voice_queue().clear()})
+            return
         if route == "outbox":
             path = body.get("path")
             if not path:
@@ -1648,6 +1851,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/out/"):
             self._serve_outbox(self.path[len("/out/"):].split("?")[0])
+            return
+        if self.path.startswith("/voice"):
+            serve_voice_page(self)
             return
         if self.path.startswith("/dashboard"):
             self._dashboard()
@@ -2091,6 +2297,10 @@ def main():
     log("tools    : %d from %d MCP servers" % (len(hub.specs), len(hub.servers)))
     log("jobs     : %s worker(s), queued=%d" % (runner.workers, job_store().stats()["by_status"].get("pending", 0)))
     log("config   : %s" % CONFIG_PATH)
+    fs_entry = next((s for s in (CFG.get("servers") or []) if s.get("name") == "fs"), {})
+    log("fs roots : %s" % ((fs_entry.get("env") or {}).get("MCP_FS_ROOTS") or "(user home)"))
+    log("voice    : %s" % ("on - open http://%s:%s/voice on the phone" % (lan_ip(), proxy_port)
+                           if (CFG.get("proxy") or {}).get("enabled", True) is not False else "off"))
     dashboard_host = host if host not in ("0.0.0.0", "::", "") else lan_ip()
     if control_required():
         log("console  : http://%s:%d/dashboard?token=%s" % (dashboard_host, port, control_token()))

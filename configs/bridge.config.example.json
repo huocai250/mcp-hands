@@ -43,6 +43,10 @@
     "path": "",
     "salt": ""
   },
+  "voice": {
+    "path": "",
+    "max_lines": 200
+  },
   "plans": {
     "db": ""
   },
@@ -122,6 +126,7 @@
     { "name": "plan", "enabled": true },
     { "name": "audit", "enabled": true },
     { "name": "send", "enabled": true },
-    { "name": "device", "enabled": true }
+    { "name": "device", "enabled": true },
+    { "name": "call", "enabled": true }
   ]
 }

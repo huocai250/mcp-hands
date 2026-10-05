@@ -15,6 +15,18 @@ class McpError(RuntimeError):
     pass
 
 
+#: Servers whose tools legitimately run for minutes (recursive scans, installs, big
+#: archives). The old flat 60s cap made a slow call look like a crashed server, and the
+#: in-flight tool calls around it failed with "server X closed stdout".
+SLOW_SERVERS = {
+    "shell": 300, "forensics": 300, "archive": 300, "backup": 600, "media2": 300,
+    "netcheck": 240, "web": 180, "net": 180, "netadv": 180, "office2": 180,
+    "files2": 180, "pdf": 180, "fs": 120, "vision": 120, "sqlite": 120, "soft": 300,
+    "monitor": 120, "voice": 120, "media": 180,
+}
+DEFAULT_TIMEOUT = 60
+
+
 class McpServer:
     def __init__(self, name, argv, env=None, cwd=None, timeout=60):
         self.name = name
@@ -30,6 +42,23 @@ class McpServer:
         self._lock = threading.Lock()
         self._proc = None
         self._dead = None
+        self.restarts = 0
+
+    @property
+    def alive(self):
+        return self._proc is not None and self._proc.poll() is None
+
+    def restart(self):
+        """Bring this one server back after a crash; the others keep running."""
+        self.restarts += 1
+        self.log.append("restart #%d of server %s" % (self.restarts, self.name))
+        self._dead = None
+        try:
+            self.start()
+        except Exception as exc:  # noqa: BLE001
+            self._dead = "server %s failed to restart: %s" % (self.name, exc)
+            return False
+        return True
 
     # ---------------------------------------------------------------- lifecycle
     def start(self):
@@ -128,7 +157,20 @@ class McpServer:
         self._send({"jsonrpc": "2.0", "method": method, "params": params})
 
     def call_tool(self, tool, arguments, timeout=None):
-        result = self.request("tools/call", {"name": tool, "arguments": arguments or {}}, timeout)
+        for attempt in (1, 2):
+            try:
+                result = self.request("tools/call", {"name": tool, "arguments": arguments or {}}, timeout)
+                break
+            except McpError as exc:
+                note = str(exc)
+                # A dead child is retried once after an automatic restart, so the caller
+                # does not have to burn a turn. "timeout waiting" is deliberately NOT
+                # retried: the tool may still be running, and repeating it could duplicate
+                # a side effect.
+                if attempt == 1 and "closed stdout" in note and self.restart():
+                    self.log.append("restarted %s and retried %s" % (self.name, tool))
+                    continue
+                raise
         parts = []
         for item in (result or {}).get("content", []):
             if item.get("type") == "text":
@@ -186,7 +228,8 @@ class ToolHub:
             for key, value in self.extra_env.items():
                 env.setdefault(key, value)
             cfg = {"name": raw["name"], "argv": self._argv_for(raw, cwd), "env": env,
-                   "cwd": raw.get("cwd", cwd), "timeout": raw.get("timeout", 60)}
+                   "cwd": raw.get("cwd", cwd),
+                   "timeout": raw.get("timeout") or SLOW_SERVERS.get(raw["name"], DEFAULT_TIMEOUT)}
             return raw, McpServer(**cfg).start()
 
         with ThreadPoolExecutor(max_workers=min(8, len(pending))) as pool:

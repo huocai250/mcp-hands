@@ -38,6 +38,9 @@
   "devices": {
     "mode": "off"
   },
+  "voice": {
+    "max_lines": 50
+  },
   "plans": {
     "db": ""
   },
@@ -117,6 +120,7 @@
     { "name": "plan", "enabled": true },
     { "name": "audit", "enabled": true },
     { "name": "send", "enabled": true },
-    { "name": "device", "enabled": true }
+    { "name": "device", "enabled": true },
+    { "name": "call", "enabled": true }
   ]
 }
