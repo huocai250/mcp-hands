@@ -658,9 +658,11 @@ class Console(Tk):
             return False
         prox["upstream_base"] = self.proxy_upstream.get().strip() or "https://api.deepseek.com/v1"
         prox.setdefault("tool_models", ["deepseek-flash", "deepseek-chat", "deepseek-reasoner"])
-        prox.setdefault("max_tool_rounds", 24)
+        prox.setdefault("max_tool_rounds", 40)
         prox.setdefault("max_seconds", 420)
         prox.setdefault("heartbeat_seconds", 5)
+        prox.setdefault("vision_check_seconds", 600)
+        prox.setdefault("step_report", "brief")
         prox.setdefault("inject_tool_hint", True)
         vision = cfg.setdefault("vision", {})
         vision["base_url"] = self.vision_base.get().strip() or "https://api.deepseek.com/v1"

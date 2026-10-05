@@ -46,7 +46,22 @@ class Handler(BaseHTTPRequestHandler):
         user_text = last_of(messages, "user").get("content") or ""
         offered = [t["function"]["name"] for t in (body.get("tools") or [])]
 
-        if tool_message or "TOOL_RESULT" in user_text:
+        if "LOOP:" in user_text:
+            # Keep calling a tool until N tool results exist: exercises long chains and
+            # the round budget without needing a real model. Checked first, because a
+            # tool result is already in the history after the first round.
+            line = [l for l in user_text.splitlines() if "LOOP:" in l][0]
+            spec = line.split("LOOP:")[1].strip()
+            tool = spec.split()[0]
+            target = int(spec.split()[1]) if len(spec.split()) > 1 else 3
+            done = sum(1 for m in messages if m.get("role") == "tool")
+            if done < target:
+                message = {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "call_%d" % int(time.time() * 1000), "type": "function",
+                     "function": {"name": tool, "arguments": json.dumps({"expression": "%d+1" % done})}}]}
+            else:
+                message = {"role": "assistant", "content": "链式动作做完了，共 %d 步。" % done}
+        elif tool_message or "TOOL_RESULT" in user_text:
             text = (tool_message.get("content") or user_text).strip()
             content = "工具结果收到啦～\n> %s\n\n[offered_tools=%d]" % (text.splitlines()[0][:200], len(offered))
             message = {"role": "assistant", "content": content}
@@ -64,6 +79,9 @@ class Handler(BaseHTTPRequestHandler):
                 len(messages), joined.count("TOOL:") + joined.count("TOOL_PROTOCOL"),
                 joined.count("TOOL_PROTOCOL_V1") + joined.count("外部工具协议"),
                 sum(1 for m in messages if m.get("role") == "system"))}
+        elif "ECHO_SYS" in user_text:
+            system = next((m.get("content") or "" for m in messages if m.get("role") == "system"), "")
+            message = {"role": "assistant", "content": "SYS>>> %s" % system}
         elif "DSMLONLY:" in user_text:
             # Reproduce DeepSeek emitting tool markup as *text* (no native tool_calls),
             # the exact shape seen in the phone app.

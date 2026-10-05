@@ -414,6 +414,23 @@ def vision_ask_many(paths, question, api_key=""):
     return "images=%d\n%s\n%s" % (len(raws), _stamp((0, 0), int((time.time() - started) * 1000)), answer)
 
 
+@srv.tool("vision_sight_check", "Check whether I can really see right now (call before claiming anything about the screen).",
+          {"type": "object", "properties": {"api_key": {"type": "string", "default": ""}}, "required": []})
+def vision_sight_check(api_key=""):
+    cfg = _cfg()
+    if not (api_key or cfg["api_key"]):
+        return ("看得见？看不见。原因：没有可用的视觉 key"
+                "（走 App 直连代理会自动带上；桥接模式要在 vision.api_key 里填）。")
+    try:
+        raw, _size = _prepare(Image.new("RGB", (64, 64), (10, 200, 10)), max_pixels=64)
+        answer = _ask([raw], "这张图是什么颜色？只回答颜色名。", max_tokens=64,
+                      overrides=_overrides(api_key, detail="low"))
+    except Exception as exc:  # noqa: BLE001
+        return "看得见？看不见。视觉调用失败：%s" % str(exc)[:200]
+    return ("看得见。模型 %s 正常应答（%s）。可以放心调用 vision_see_screen / vision_read_screen_text，"
+            "并在回答里描述真正看到的东西。" % (cfg["model"], answer.strip()[:40]))
+
+
 @srv.tool("screenshot_for_vision", "Save a screenshot to a file (for later see_image / comparisons).",
           {"type": "object", "properties": {"out": {"type": "string", "default": ""},
                                             "monitor": {"type": "string", "default": "primary"}},

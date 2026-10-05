@@ -32,7 +32,7 @@ sys.path.insert(0, HERE)
 
 # ------------------------------------------------------------------ branding
 APP_NAME = "mcp-hands"
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 APP_AUTHOR = "huocai250"
 APP_URL = "https://github.com/huocai250/mcp-hands"
 APP_LICENSE = "MIT"
@@ -178,6 +178,14 @@ def load_config():
     cfg.setdefault("upstream_history", "last_user_only")
     cfg.setdefault("include_client_system", False)
     cfg.setdefault("always_expose_tools", True)
+    # Keep old config files working: new proxy knobs get sane defaults here.
+    proxy = cfg.setdefault("proxy", {})
+    proxy.setdefault("max_tool_rounds", 40)
+    proxy.setdefault("max_seconds", 420)
+    proxy.setdefault("heartbeat_seconds", 5)
+    proxy.setdefault("vision_check_seconds", 600)
+    proxy.setdefault("step_report", "brief")
+    cfg.setdefault("vision", {}).setdefault("thinking", "disabled")
     return cfg
 
 
@@ -410,7 +418,14 @@ _ATTR = re.compile(r'([A-Za-z_][\w-]*)\s*=\s*"([^"]*)"|([A-Za-z_][\w-]*)\s*=\s*\
 
 
 def _normalize_dsml(text):
-    """`<||DSML||invoke name="x">` -> `<invoke name="x">` so it can be parsed as XML-ish."""
+    """`<||DSML||invoke name="x">` -> `<invoke name="x">` so it can be parsed as XML-ish.
+
+    Models sometimes emit fullwidth angle brackets/quotes when writing this markup by
+    hand, so those are folded back to ASCII first. Only DSML-bearing text reaches here.
+    """
+    for full, ascii_ in (("＜", "<"), ("＞", ">"), ("＂", '"'), ("’", "'"), ("＇", "'")):
+        if full in text:
+            text = text.replace(full, ascii_)
     return _DSML_TAG.sub(lambda m: "<%s%s" % (m.group(1), m.group(2)), text)
 
 
@@ -424,25 +439,33 @@ def _attrs(raw):
 
 
 def parse_dsml_calls(text):
-    """Extract calls from DeepSeek's DSML markup. Returns a list of {name, arguments}."""
-    if not isinstance(text, str) or "DSML" not in text and "<invoke" not in text:
+    """Extract calls from DeepSeek's DSML markup. Returns a list of {name, arguments}.
+
+    Tolerant on purpose: the model often emits truncated markup (unclosed invoke or
+    parameter tags) or mixes in prose. A call is still recovered from all of those.
+    """
+    if not isinstance(text, str) or ("DSML" not in text and "<invoke" not in text and "<parameter" not in text):
         return []
     normalized = _normalize_dsml(text)
     calls = []
-    for block in re.finditer(r"(?ms)<invoke\b([^>]*)>(.*?)</invoke>", normalized):
-        name = _attrs(block.group(1)).get("name", "").strip()
+    pattern = r"(?ms)<invoke\b([^>]*?)/?>(.*?)(?:</invoke>|\Z)|<invoke\b([^>]*?)/>\s*"
+    for block in re.finditer(pattern, normalized):
+        attrs = block.group(1) if block.group(1) is not None else block.group(3)
+        inner = block.group(2) or ""
+        name = _attrs(attrs or "").get("name", "").strip()
         if not name:
             continue
         args = {}
-        inner = block.group(2)
-        for param in re.finditer(r"(?ms)<parameter\b([^>]*)>(.*?)</parameter>", inner):
-            head = _attrs(param.group(1))
-            key = (head.get("name") or "").strip()
+        for param in re.finditer(r"(?ms)<parameter\b([^>]*?)/?>(.*?)(?:</parameter>|\Z)|<parameter\b([^>]*?)/>",
+                                 inner):
+            head = param.group(1) if param.group(1) is not None else param.group(3)
+            key = (_attrs(head or "").get("name") or "").strip()
             if not key:
                 continue
-            value = re.sub(r"</?[^>]+>", "", param.group(2)).strip()
+            raw = param.group(2) or ""
+            value = re.sub(r"</?[^>]+>", "", raw).strip()
             # `string="false"` marks a non-string payload (number/bool/object).
-            if (head.get("string") or "true").lower() == "false":
+            if (_attrs(head or "").get("string") or "true").lower() == "false":
                 try:
                     value = json.loads(value)
                 except json.JSONDecodeError:
@@ -457,13 +480,16 @@ def parse_dsml_calls(text):
 
 def strip_dsml(text):
     """Remove all DSML markup so it can never show up as a visible reply."""
-    if not isinstance(text, str) or ("DSML" not in text and "<invoke" not in text):
+    if not isinstance(text, str) or ("DSML" not in text and "<invoke" not in text and "<parameter" not in text):
         return text
     cleaned = re.sub(r"(?ms)<calls\b.*?</calls>", " ", _normalize_dsml(text))
     cleaned = re.sub(r"(?ms)<invoke\b.*?</invoke>", " ", cleaned)
+    cleaned = re.sub(r"(?ms)<invoke\b.*\Z", " ", cleaned)      # truncated markup
     cleaned = _DSML_ANY.sub(" ", cleaned)
+    cleaned = re.sub(r"(?i)(?m)^[^\n]*(?:\|\s*){2,}\s*DSML[^\n]*$", " ", cleaned)
+    cleaned = re.sub(r"<\s*/?\s*(?:invoke|parameter|calls|DSML)\b[^>]*>?", " ", cleaned, flags=re.I)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
-    return "\n".join(line.rstrip() for line in cleaned.splitlines()).strip()
+    return "\n".join(line.rstrip() for line in cleaned.splitlines() if line.strip()).strip()
 
 
 def parse_tool_calls(text):

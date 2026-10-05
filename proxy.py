@@ -78,15 +78,66 @@ def upstream_open(path, payload, auth, timeout=240):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
-TOOL_HINT = ("你可以调用下面这些工具来真的操作这台 Windows 电脑，工具会立即执行并返回真实结果。"
-             "需要时直接发起工具调用，不要用文字描述工具调用、也不要输出 JSON 或代码块来假装调用。")
+TOOL_HINT = (
+    "你在操作一台真实的 Windows 电脑，下面这些工具会立即执行，并返回真实结果。硬性规则：\n"
+    "1) 要动手就直接发起工具调用；不要用文字描述调用、不要写 JSON 或代码块假装调用，"
+    "也不要写 <||DSML||...> 这类标记（那是坏掉的调用，用户会看到一堆乱码）。\n"
+    "2) 只有工具**真的返回了结果**才算完成；没返回就不许说「已完成」，也不许凭猜测描述屏幕内容。\n"
+    "3) 万一原生调用不可用，只能用下面这种行格式作后备（一行一个调用，不要方括号）：\n"
+    "TOOL: 工具名\n参数名=值\nEND\n"
+    "4) 一次请求里你可以连着调度很多个动作（最多 %(rounds)s 轮 / %(seconds)s 秒），"
+    "做够了再用中文汇报；到上限我会把你这轮做过的每一步列给用户看。")
 
 # Sent only on the last round, when tools are withheld so the model must speak in prose.
 FINAL_NUDGE = {"role": "user", "content": "（系统：本轮工具调用额度已用完，请直接用一两句中文总结你刚才做了什么、"
                                          "画面/页面现在是什么状态，不要再输出任何工具调用、标记或标记语言。）"}
 
+_VISION_CACHE = {"key": "", "at": 0.0, "ok": False, "detail": ""}
 
-def finalize(message):
+
+def vision_status_line(auth):
+    """Tell the model whether it can actually see, so it never bluffs about the screen."""
+    cfg = proxy_cfg().get("vision") or bridge.CFG.get("vision") or {}
+    token = (auth or "").replace("Bearer ", "").strip()
+    key = cfg.get("api_key") or (token if cfg.get("inherit_upstream_key", True) and token.lower() != "aiyu" else "")
+    if not key:
+        return ("视觉状态：**未接通**（没有可用的视觉 key）。你现在看不见屏幕，vision_* 工具会报错——"
+                "不要编造画面内容，直接告诉用户「我现在看不见」。")
+    ttl = float(proxy_cfg().get("vision_check_seconds", 600) or 0)
+    fresh = ttl > 0 and _VISION_CACHE["key"] == key and (time.time() - _VISION_CACHE["at"]) < ttl
+    if not fresh:
+        try:
+            out, err = bridge.start_hub().call("vision_vision_probe", {"api_key": key})
+        except Exception as exc:  # noqa: BLE001
+            out, err = "%s: %s" % (type(exc).__name__, exc), True
+        _VISION_CACHE.update({"key": key, "at": time.time(), "ok": not err,
+                              "detail": ((out or "").splitlines() or [""])[-1][:90]})
+        log("  vision check: %s %s" % ("ok" if not err else "FAILED", _VISION_CACHE["detail"]))
+    if _VISION_CACHE["ok"]:
+        return ("视觉状态：已接通（%s）。要看屏幕就直接调 vision_see_screen / vision_read_screen_text。"
+                % (cfg.get("model") or "vision"))
+    return ("视觉状态：**不通**（%s）。vision_* 会失败——不要编造画面内容，直接告诉用户「我现在看不见」。"
+            % _VISION_CACHE["detail"])
+
+
+def step_report(steps, mode="brief", limit=8):
+    """The honesty block: every real tool result of this turn, laid out for the user."""
+    if not steps or mode == "off":
+        return ""
+    lines = ["", "— 这轮电脑侧的真实回执 —"]
+    for index, step in enumerate(steps[:limit], 1):
+        output = step.get("output") or ""
+        if mode == "full":
+            text = output[:400].replace("\n", " | ")
+        else:
+            text = ((output.splitlines() or [""])[0])[:140]
+        lines.append("%d. %s %s：%s" % (index, step["tool"], "失败" if step.get("error") else "成功", text))
+    if len(steps) > limit:
+        lines.append("…（本轮共 %d 步）" % len(steps))
+    return "\n".join(lines)
+
+
+def finalize(message, steps=None):
     """Last line of defence: protocol markup must never reach the phone screen."""
     if not isinstance(message, dict):
         return {"role": "assistant", "content": ""}
@@ -94,10 +145,10 @@ def finalize(message):
     if isinstance(content, str) and content:
         message = dict(message, content=bridge.strip_dsml(content))
     text = (message.get("content") or "").strip()
-    if not text and message.get("tool_calls"):
-        text = ""
+    report = step_report(steps or [], proxy_cfg().get("step_report", "brief"))
     if not text:
-        message = dict(message, content="（这轮我做到上限了，先停一下；要我接着来就说一声。）")
+        text = "（这轮我做到上限了，先停一下；接着来的话说一声。）" if steps else ""
+    message = dict(message, content=(text + report).strip())
     message.pop("tool_calls", None)
     return message
 
@@ -183,24 +234,27 @@ def run_tool_loop(body, auth):
     if len(messages) != len(raw_messages):
         log("  scrubbed %d protocol-contaminated message(s) from history" % (len(raw_messages) - len(messages)))
     if proxy_cfg().get("inject_tool_hint", True):
-        messages.insert(0, {"role": "system", "content": TOOL_HINT})
+        cfg_now = proxy_cfg()
+        hint = TOOL_HINT % {"rounds": int(cfg_now.get("max_tool_rounds", 40) or 40),
+                            "seconds": int(float(cfg_now.get("max_seconds", 420) or 420))}
+        hint += "\n" + vision_status_line(auth)
+        messages.insert(0, {"role": "system", "content": hint})
     tools = native_tools(hub)
     extra = {k: v for k, v in body.items() if k in ("temperature", "top_p", "max_tokens", "frequency_penalty", "presence_penalty", "response_format")}
     steps = []
     message = {}
     cfg = proxy_cfg()
-    rounds = max(1, int(cfg.get("max_tool_rounds", 12) or 12))
+    rounds = max(1, int(cfg.get("max_tool_rounds", 40) or 40))
     budget = float(cfg.get("max_seconds", 420) or 0)
     started = time.time()
     for round_no in range(rounds + 1):
         elapsed = time.time() - started
         if budget and elapsed > budget:
             log("  time budget %.0fs reached after %d step(s) -> wrapping up" % (budget, len(steps)))
-            done = ", ".join(step["tool"] for step in steps[-10:]) or "什么都没来得及做"
-            note = "（我已经连续操作了 %.0f 秒，先停在这里。这轮做过的动作：%s）" % (elapsed, done)
+            note = "（我已经连续操作了 %.0f 秒，先停在这里。）" % elapsed
             message = {"role": "assistant",
                        "content": (bridge.strip_dsml((message.get("content") or "").strip()) + "\n" + note).strip()}
-            return finalize(message), steps, {}
+            return finalize(message, steps), steps, {}
         last_round = round_no >= rounds
         if last_round:
             # Final round: send no tools at all. With tools still declared (and
@@ -223,7 +277,7 @@ def run_tool_loop(body, auth):
             # (strong history bias, or a weak function-calling model). Act on it anyway.
             fallback = bridge.parse_tool_calls(content)
             if not fallback:
-                return finalize(message), steps, data.get("usage") or {}
+                return finalize(message, steps), steps, data.get("usage") or {}
             log("  model replied with %s (%d call(s)) -> executing anyway"
                 % ("DSML markup" if bridge.parse_dsml_calls(content) else "text protocol", len(fallback)))
             messages.append({"role": "assistant", "content": bridge.strip_dsml(content) or content})
@@ -255,7 +309,7 @@ def run_tool_loop(body, auth):
                              "content": ("[tool failed] " if is_error else "") + output[:6000]})
     # Out of rounds: never hand the app DSML markup or a dangling tool_call.
     log("  round budget exhausted after %d step(s)" % len(steps))
-    return finalize(message), steps, {}
+    return finalize(message, steps), steps, {}
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
