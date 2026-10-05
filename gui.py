@@ -331,13 +331,29 @@ class Console(Tk):
 
         def worker():
             hub = bridge.start_hub()
-            started = time.time()
-            out, err = hub.call("vision_vision_probe", {})
-            if err:
-                self.say("视觉测试失败：%s" % out.splitlines()[0][:300])
-                self.say("排查：走 8890 时 App 的 key 会自动沿用；否则请在下面填 DeepSeek key，或确认 model=deepseek-flash")
+            args = {}
+            source = "配置里的 vision.api_key"
+            typed = self.vision_key.get().strip()
+            if typed:
+                args["api_key"] = typed
+                source = "「视觉识别 → Key」里填的 key"
             else:
-                self.say("视觉测试通过（%.1fs）：%s" % (time.time() - started, out.replace("\n", " | ")))
+                token, age = proxy_module.last_key()
+                if token:
+                    args["api_key"] = token
+                    source = "App 直连代理刚从 App 请求里记下的 key（%.0f 秒前）" % (age or 0)
+            if not args.get("api_key") and not (bridge.CFG.get("vision") or {}).get("api_key"):
+                self.say("视觉测试跳过：暂时拿不到可用的 key。")
+                self.say("· 走 App 直连代理（8890）：先在手机上随便发一句消息，代理就会记住 App 的 key，然后再点「测试视觉」；")
+                self.say("· 或者在这里的「视觉识别 → Key」填你的 DeepSeek key（也可设 DEEPSEEK_API_KEY 环境变量）后点「保存并重启」。")
+                return
+            started = time.time()
+            out, err = hub.call("vision_vision_probe", args)
+            if err:
+                self.say("视觉测试失败（用的 key 来源：%s）：%s" % (source, out.splitlines()[0][:300]))
+                self.say("排查：确认「视觉识别 → 模型」为 deepseek-flash（它才支持图片），或换一个支持视觉的 OpenAI 兼容端点。")
+            else:
+                self.say("视觉测试通过（%.1fs，key 来源：%s）：%s" % (time.time() - started, source, out.replace("\n", " | ")))
 
         threading.Thread(target=worker, daemon=True).start()
 

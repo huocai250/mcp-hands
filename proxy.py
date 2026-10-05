@@ -29,6 +29,25 @@ import bridge  # noqa: E402
 
 LOG_LOCK = threading.Lock()
 
+# The key the app last sent us. The GUI's "test vision" button reuses it, because a
+# direct hub call bypasses this proxy and therefore has no key of its own.
+_LAST_KEY = {"token": "", "at": 0.0}
+
+
+def remember_key(auth):
+    token = (auth or "").replace("Bearer ", "").strip()
+    if token and token.lower() != "aiyu":
+        _LAST_KEY["token"] = token
+        _LAST_KEY["at"] = time.time()
+    return token
+
+
+def last_key():
+    """(token, age_seconds) of the most recent app request, or ("", None)."""
+    if not _LAST_KEY["token"]:
+        return "", None
+    return _LAST_KEY["token"], time.time() - _LAST_KEY["at"]
+
 
 def log(msg):
     bridge.log(msg)
@@ -311,6 +330,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._relay(body, auth, "/chat/completions")
             return
         log("tool request: model=%s messages=%d stream=%s" % (model, len(body.get("messages") or []), body.get("stream")))
+        token = remember_key(auth)
+        if token:
+            log("  remembered the app's key (%s...) for vision calls" % token[:6])
         try:
             message, steps, usage = run_tool_loop(body, auth)
         except urllib.error.HTTPError as exc:
