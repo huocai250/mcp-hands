@@ -282,6 +282,82 @@ def stop_server(port=0):
                                     for p, e in zip(victims, entries))
 
 
+# Screenshots meant for the user's phone live here; one call captures, serves and
+# returns a URL, so the assistant never has to hand-roll a file server again.
+SHOT_ROOT = os.path.join(os.environ.get("TEMP") or os.path.expanduser("~"), "mcp-hands-shots")
+
+
+def _grab_screen(monitor="primary"):
+    from PIL import ImageGrab
+    if str(monitor).strip().lower() in ("all", "-1", "virtual"):
+        return ImageGrab.grab(all_screens=True)
+    return ImageGrab.grab()
+
+
+def _shrink(image, max_pixels):
+    from PIL import Image
+    limit = int(max_pixels or 0)
+    width, height = image.size
+    if limit and max(width, height) > limit:
+        scale = limit / float(max(width, height))
+        image = image.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.LANCZOS)
+    return image
+
+
+def _ensure_server(port):
+    """Reuse a running server, or start one rooted at the screenshot folder."""
+    entry, share = _share_root()
+    if entry is not None:
+        return entry, share, ""
+    os.makedirs(SHOT_ROOT, exist_ok=True)
+    started = serve_dir(SHOT_ROOT, port)
+    if "serving" not in started:
+        return None, None, started
+    entry, share = _share_root()
+    return entry, share, ""
+
+
+@srv.tool("share_screenshot",
+          "Capture the screen, save it into the served folder and return a URL the phone can open on the "
+          "same Wi-Fi (also returns a markdown image line). Starts the file server if none is running.",
+          {"type": "object", "properties": {"monitor": {"type": "string", "default": "primary"},
+                                            "port": {"type": "integer", "default": 8811},
+                                            "max_pixels": {"type": "integer", "default": 1600},
+                                            "name": {"type": "string", "default": ""}},
+           "required": []})
+def share_screenshot(monitor="primary", port=8811, max_pixels=1600, name=""):
+    entry, share, problem = _ensure_server(port)
+    if entry is None:
+        return "could not start the file server: %s" % problem
+    image = _shrink(_grab_screen(monitor), max_pixels)
+    os.makedirs(share, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    wanted = str(name or "").strip() or ("screen-%s.png" % stamp)
+    if not wanted.lower().endswith(".png"):
+        wanted += ".png"
+    target = _free_name(share, wanted)
+    image.save(target, format="PNG")
+    rel = "/".join([SHARE_DIR_NAME, os.path.basename(target)])
+    url = _entry_url(entry, rel)
+    verified = "not checked"
+    try:
+        probe = url.replace(urllib.parse.urlsplit(url).hostname, "127.0.0.1")
+        with urllib.request.urlopen(probe, timeout=8) as resp:
+            verified = "HTTP %s, %d bytes" % (resp.status, len(resp.read()))
+    except Exception as exc:  # noqa: BLE001
+        verified = "local check failed: %s" % exc
+    return "\n".join([
+        "screenshot=%s" % target,
+        "size=%dx%d bytes=%d" % (image.size[0], image.size[1], os.path.getsize(target)),
+        "url=%s" % url,
+        "markdown=![screenshot](%s)" % url,
+        "verified=%s" % verified,
+        "phone=open the url on the same Wi-Fi; if it does not load, allow inbound port %d "
+        "(console has an allow-firewall button)" % entry["port"],
+        "note=send the markdown line to the user, it renders inline in most clients",
+    ])
+
+
 @srv.tool("share_file", "Copy a file into the active share folder and return its download URL.",
           {"type": "object", "properties": {"path": {"type": "string"}, "name": {"type": "string", "default": ""}}, "required": ["path"]})
 def share_file(path, name=""):
@@ -449,6 +525,7 @@ SAMPLES = {
     "serve_dir": {"root": _SHARE, "port": PORT, "host": "0.0.0.0"},
     "local_urls": {"port": PORT},
     "server_status": {},
+    "share_screenshot": {"max_pixels": 800},
     "share_file": {"path": _SHARE_FILE},
     "download_to_share": {"url": "http://127.0.0.1:0/hello.txt", "name": "fetched.txt"},
     "file_url": {"path": _SHARE_FILE, "port": PORT},

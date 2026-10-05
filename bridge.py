@@ -32,7 +32,7 @@ sys.path.insert(0, HERE)
 
 # ------------------------------------------------------------------ branding
 APP_NAME = "mcp-hands"
-APP_VERSION = "1.1.5"
+APP_VERSION = "1.1.6"
 APP_AUTHOR = "huocai250"
 APP_URL = "https://github.com/huocai250/mcp-hands"
 APP_LICENSE = "MIT"
@@ -185,6 +185,7 @@ def load_config():
     proxy.setdefault("heartbeat_seconds", 5)
     proxy.setdefault("vision_check_seconds", 600)
     proxy.setdefault("step_report", "brief")
+    proxy.setdefault("progress_stream", True)
     cfg.setdefault("vision", {}).setdefault("thinking", "disabled")
     return cfg
 
@@ -523,12 +524,19 @@ def _cast(value, kind):
 
 
 def coerce_args(name, args):
-    """Cast line-protocol strings into the types the tool schema declares."""
+    """Cast line-protocol strings into the types the tool schema declares.
+
+    Arguments the tool does not declare are dropped instead of being passed through:
+    models occasionally invent extra fields, and a stray keyword would otherwise make
+    an otherwise fine call fail with TypeError.
+    """
     hub = start_hub()
     spec = next((s for s in hub.specs if s["name"] == name), None)
     props = ((spec or {}).get("inputSchema") or {}).get("properties") or {}
     out = {}
     for key, value in (args or {}).items():
+        if props and key not in props:
+            continue
         declared = props.get(key) or {}
         kind = declared.get("type")
         item_kind = (declared.get("items") or {}).get("type")

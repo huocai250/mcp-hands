@@ -50,15 +50,18 @@ class Handler(BaseHTTPRequestHandler):
             # Keep calling a tool until N tool results exist: exercises long chains and
             # the round budget without needing a real model. Checked first, because a
             # tool result is already in the history after the first round.
+            # Form: LOOP: <tool> <n> [json-args]
             line = [l for l in user_text.splitlines() if "LOOP:" in l][0]
             spec = line.split("LOOP:")[1].strip()
-            tool = spec.split()[0]
-            target = int(spec.split()[1]) if len(spec.split()) > 1 else 3
+            bits = spec.split()
+            tool = bits[0]
+            target = int(bits[1]) if len(bits) > 1 and bits[1].isdigit() else 3
+            args = json.loads(" ".join(bits[2:])) if len(bits) > 2 else {}
             done = sum(1 for m in messages if m.get("role") == "tool")
             if done < target:
                 message = {"role": "assistant", "content": None, "tool_calls": [
                     {"id": "call_%d" % int(time.time() * 1000), "type": "function",
-                     "function": {"name": tool, "arguments": json.dumps({"expression": "%d+1" % done})}}]}
+                     "function": {"name": tool, "arguments": json.dumps(args)}}]}
             else:
                 message = {"role": "assistant", "content": "链式动作做完了，共 %d 步。" % done}
         elif tool_message or "TOOL_RESULT" in user_text:

@@ -96,6 +96,8 @@ TOOL_HINT = """你在操作一台真实的 Windows 电脑，下面这些工具�
 
 【7 主动开口】你不能主动在手机 App 里发消息（App 没有推送通道），也绝不许谎称你发过。要主动找用户就走电脑通道：立刻提醒用 sys_toast 或 voice_toast_speak（后者会念出来）；定时提醒用 remind_in(minutes=数字, text="要说的话") 或 remind_at(time="18:30", text="...")；查已排的提醒用 remind_list。
 
+【9 给用户看图】用户要看画面/截图时，直接调 http_share_screenshot（它会截屏、放进已启动的文件服务并返回手机可打开的链接），然后把返回里的 markdown 那一行原样发出来——多数客户端会直接渲染成图片，没有也能点链接。不要自己手搓文件服务器、也不要只丢裸链接。
+
 【8 完成度】只有工具真的返回了结果才算完成；没返回就不许说「已完成」，也不许凭猜测描述屏幕内容。"""
 
 # Sent only on the last round, when tools are withheld so the model must speak in prose.
@@ -132,6 +134,7 @@ def vision_status_line(auth):
 
 _RECEIPT_NOISE = re.compile(
     r"^(exit=\d+|ok\b[\s\S]*|\[[^\]]*\]|.*\b(?:bytes|ms|chars|truncated)=\S+.*)$", re.I)
+_RECEIPT_DIGITS = re.compile(r"^[\s\d\W_]+$")
 
 
 def _digest(output, limit=140):
@@ -139,13 +142,35 @@ def _digest(output, limit=140):
     text = output or ""
     for line in text.splitlines():
         candidate = line.strip()
-        if not candidate or _RECEIPT_NOISE.match(candidate):
+        if not candidate or _RECEIPT_NOISE.match(candidate) or _RECEIPT_DIGITS.match(candidate):
             continue
         candidate = re.sub(r"\b(?:exit=\d+|bytes=\d+|ms=\d+|chars=\d+|truncated=\w+)\b", "", candidate)
         candidate = re.sub(r"\s{2,}", " ", candidate).strip(" |,-")
         if candidate:
             return candidate[:limit]
     return ((text.splitlines() or [""])[0])[:limit]
+
+
+# Short, human progress lines so the phone shows something while slow tools run.
+PROGRESS_MAP = (
+    ("vision_see", "正在看屏幕"), ("vision_read_screen", "正在读屏幕上的字"),
+    ("vision_", "正在看图"), ("desktop_", "正在操作桌面"), ("http_", "正在准备分享链接"),
+    ("shell_", "正在执行命令"), ("fs_", "正在读写文件"), ("web_", "正在上网查"),
+    ("office", "正在处理 Office 文件"), ("media", "正在处理图片/媒体"),
+    ("sched_", "正在安排任务"), ("notes_", "正在记下来"), ("pwd_", "正在生成密钥"),
+    ("net", "正在检查网络"), ("registry", "正在读注册表"), ("sqlite", "正在查数据库"),
+)
+
+
+def progress_text(tool_name, error=False):
+    label = None
+    for prefix, text in PROGRESS_MAP:
+        if str(tool_name).startswith(prefix) or prefix in str(tool_name):
+            label = text
+            break
+    if label is None:
+        label = "正在使用 %s" % str(tool_name).split("_", 1)[-1]
+    return "（%s%s…）\n" % (label, "，出错了换个办法" if error else "")
 
 
 def step_report(steps, mode="brief", limit=8):
@@ -249,16 +274,22 @@ def native_tools(hub):
 
 
 def vision_args(name, args, auth):
-    """Hand the chat key + configured vision endpoint to the vision tools.
+    """Drop undeclared arguments, then hand the chat key + vision config to vision tools.
 
     Path B relays the app's own key, so `see_screen` / `see_image` work without the
     user pasting a key anywhere. Only parameters the tool actually declares are set.
     """
-    if not str(name).startswith("vision_"):
-        return args
     hub = bridge.start_hub()
     spec = next((s for s in hub.specs if s["name"] == name), None)
     props = ((spec or {}).get("inputSchema") or {}).get("properties") or {}
+    if props and isinstance(args, dict):
+        dropped = [key for key in list(args) if key not in props]
+        for key in dropped:
+            args.pop(key, None)
+        if dropped:
+            log("  dropped undeclared argument(s) %s for %s" % (", ".join(dropped), name))
+    if not str(name).startswith("vision_"):
+        return args
     cfg = proxy_cfg().get("vision") or bridge.CFG.get("vision") or {}
     token = (auth or "").replace("Bearer ", "").strip()
     if "api_key" in props and not args.get("api_key"):
@@ -270,8 +301,12 @@ def vision_args(name, args, auth):
     return args
 
 
-def run_tool_loop(body, auth):
-    """Returns (message, steps, usage). message is an OpenAI assistant message dict."""
+def run_tool_loop(body, auth, on_event=None):
+    """Returns (message, steps, usage). message is an OpenAI assistant message dict.
+
+    on_event(tool_name, is_error) is called after every tool execution so the caller
+    can push a live progress line to the client instead of staying silent for minutes.
+    """
     hub = bridge.start_hub()
     model = body.get("model") or "deepseek-chat"
     raw_messages = list(body.get("messages") or [])
@@ -333,6 +368,8 @@ def run_tool_loop(body, auth):
                 log("  tool -> %s %s" % (call["name"], json.dumps(mask_args(args), ensure_ascii=False)[:200]))
                 log("  tool <- %s %s (%d chars)" % (call["name"], "ERROR" if is_error else "ok", len(output)))
                 steps.append({"tool": call["name"], "arguments": args, "error": is_error, "output": output[:4000]})
+                if on_event:
+                    on_event(call["name"], is_error)
                 results.append("TOOL_RESULT: %s %s\n%s" % (call["name"], "(failed)" if is_error else "(ok)", output[:6000]))
             messages.append({"role": "user", "content": "\n\n".join(results)})
             continue
@@ -350,6 +387,8 @@ def run_tool_loop(body, auth):
             log("  tool -> %s %s" % (name, json.dumps(mask_args(args), ensure_ascii=False)[:200]))
             log("  tool <- %s %s (%d chars)" % (name, "ERROR" if is_error else "ok", len(output)))
             steps.append({"tool": name, "arguments": args, "error": is_error, "output": output[:4000]})
+            if on_event:
+                on_event(name, is_error)
             messages.append({"role": "tool", "tool_call_id": call.get("id") or name,
                              "content": ("[tool failed] " if is_error else "") + output[:6000]})
     # Out of rounds: never hand the app DSML markup or a dangling tool_call.
@@ -414,20 +453,40 @@ class ProxyHandler(BaseHTTPRequestHandler):
         """Open the SSE stream *before* the tool loop, so the app never sits in silence."""
         self._sse_start()
         self._sse_open = True
-        self._chunk("data: " + json.dumps({
-            "id": "chatcmpl-" + uuid.uuid4().hex[:20], "object": "chat.completion.chunk",
-            "created": int(time.time()), "model": model,
-            "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]},
-            ensure_ascii=False) + "\n\n")
+        cid = "chatcmpl-" + uuid.uuid4().hex[:20]
+        created = int(time.time())
+
+        def frame(delta, finish=None):
+            self._chunk("data: " + json.dumps({
+                "id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}, ensure_ascii=False) + "\n\n")
+
+        frame({"role": "assistant", "content": ""})
         stop = self._start_heartbeat()
         started = time.time()
+
+        seen = set()
+
+        def on_event(tool_name, is_error):
+            """Push a visible progress line so the user sees work happening, not silence."""
+            if not proxy_cfg().get("progress_stream", True):
+                return
+            line = progress_text(tool_name, is_error)
+            if line.strip() in seen:
+                return
+            seen.add(line.strip())
+            try:
+                frame({"content": line})
+            except Exception:  # noqa: BLE001 - client vanished; the loop can still finish
+                pass
+
         try:
-            result = run_tool_loop(body, auth)
+            result = run_tool_loop(body, auth, on_event=on_event)
         finally:
             if stop:
                 stop.set()
-            log("  tool loop finished in %.1fs (heartbeats %s)"
-                % (time.time() - started, "on" if stop else "off"))
+            log("  tool loop finished in %.1fs (%d progress line(s), heartbeats %s)"
+                % (time.time() - started, len(seen), "on" if stop else "off"))
         return result
 
     def _finish_stream(self, error_text):

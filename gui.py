@@ -663,6 +663,7 @@ class Console(Tk):
         prox.setdefault("heartbeat_seconds", 5)
         prox.setdefault("vision_check_seconds", 600)
         prox.setdefault("step_report", "brief")
+        prox.setdefault("progress_stream", True)
         prox.setdefault("inject_tool_hint", True)
         vision = cfg.setdefault("vision", {})
         vision["base_url"] = self.vision_base.get().strip() or "https://api.deepseek.com/v1"

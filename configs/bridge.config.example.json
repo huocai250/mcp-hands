@@ -32,6 +32,7 @@
     "heartbeat_seconds": 5,
     "vision_check_seconds": 600,
     "step_report": "brief",
+    "progress_stream": true,
     "inject_tool_hint": true
   },
   "servers": [

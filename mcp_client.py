@@ -213,11 +213,24 @@ class ToolHub:
                 return target
         return None
 
+    def spec_for(self, name):
+        """The exposed schema of a tool, or None."""
+        return next((s for s in self.specs if s["name"] == name), None)
+
     def call(self, name, arguments):
         target = self.resolve(name)
         if not target:
             return "unknown tool '%s'. available: %s" % (name, ", ".join(s["name"] for s in self.specs)), True
         server, tool = target
+        # Models sometimes invent extra fields; a stray keyword would otherwise turn a
+        # perfectly good call into TypeError. Drop anything the schema does not declare.
+        spec = self.spec_for(name)
+        props = ((spec or {}).get("inputSchema") or {}).get("properties") or {}
+        if props and isinstance(arguments, dict):
+            dropped = sorted(key for key in arguments if key not in props)
+            if dropped:
+                arguments = {k: v for k, v in arguments.items() if k in props}
+                self.log("tool '%s': ignored undeclared argument(s) %s" % (name, ", ".join(dropped)))
         try:
             text, is_error = server.call_tool(tool, arguments)
         except McpError as exc:
