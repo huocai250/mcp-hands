@@ -483,6 +483,18 @@ report(27, "a shell timeout kills the process tree and leaves the server usable"
        "msg=%s pings %d->%d next=%s" % ((timed or "").splitlines()[0][:40], len(before_pings),
                                         len(after_pings), (after_call or "").splitlines()[-1][:30]))
 
+# 28. the legacy file-server tools must hand back a phone-renderable outbox URL, not their
+# own port (measured: the client only renders links from its own origin, so :8892 links
+# were shown as dead text no matter what)
+legacy = os.path.join(STATE, "legacy.png")
+with open(legacy, "wb") as fh:
+    fh.write(b"\x89PNG\r\n\x1a\n" + b"1" * 40)
+shared, shared_err = hub.call("http_share_file", {"path": legacy})
+report(28, "share_file answers with an outbox URL (the port the client renders)",
+       not (bool(shared) and shared.strip().startswith("http") and "/out/" in shared
+            and str(PROXY_PORT) in shared),
+       "result=%s" % (shared or shared_err or "").strip()[:80])
+
 service.stop()
 server.shutdown()
 bridge.stop_hub()

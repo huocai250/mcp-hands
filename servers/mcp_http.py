@@ -6,6 +6,7 @@ server (stop_server) when the transfer is done.
 """
 import functools
 import http.server
+import json
 import os
 import socket
 import subprocess
@@ -317,57 +318,85 @@ def _ensure_server(port):
     return entry, share, ""
 
 
+def _outbox_deliver(path, kind="image", note=""):
+    """Hand a file to the bridge outbox and return the phone-facing URL.
+
+    4.3.1 - measured on the real client: it only fetches/render pictures from **its own
+    base origin** (the proxy port, e.g. :8890/out/...). A link to this server's own port
+    (e.g. :8892/_share/...) is shown as plain text no matter how it is formatted. So the
+    file-server tools deliver through the outbox as well, and the outbox URL is what they
+    answer with.
+    """
+    api = (os.environ.get("MCP_BRIDGE_API") or "http://127.0.0.1:8877").rstrip("/")
+    payload = json.dumps({"path": os.path.abspath(path), "kind": kind, "note": note},
+                         ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(api + "/v2/outbox", data=payload, method="POST",
+                                     headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+        return (data.get("item") or {}).get("url") or "", ""
+    except Exception as exc:  # noqa: BLE001
+        return "", "%s: %s" % (type(exc).__name__, exc)
+
+
 @srv.tool("share_screenshot",
-          "Capture the screen, save it into the served folder and return a URL the phone can open on the "
-          "same Wi-Fi (also returns a markdown image line). Starts the file server if none is running.",
+          "Capture the screen and hand the user a picture link that the chat client can actually "
+          "render (delivered through the phone-facing outbox). The folder server is started too, "
+          "for browsers on the same Wi-Fi.",
           {"type": "object", "properties": {"monitor": {"type": "string", "default": "primary"},
                                             "port": {"type": "integer", "default": 8811},
                                             "max_pixels": {"type": "integer", "default": 1600},
                                             "name": {"type": "string", "default": ""}},
            "required": []})
 def share_screenshot(monitor="primary", port=8811, max_pixels=1600, name=""):
-    entry, share, problem = _ensure_server(port)
-    if entry is None:
-        return "could not start the file server: %s" % problem
     image = _shrink(_grab_screen(monitor), max_pixels)
-    os.makedirs(share, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     wanted = str(name or "").strip() or ("screen-%s.png" % stamp)
     if not wanted.lower().endswith(".png"):
         wanted += ".png"
-    target = _free_name(share, wanted)
+    shot_dir = os.path.join(SHOT_ROOT, "chat")
+    os.makedirs(shot_dir, exist_ok=True)
+    target = _free_name(shot_dir, wanted)
     image.save(target, format="PNG")
-    rel = "/".join([SHARE_DIR_NAME, os.path.basename(target)])
-    url = _entry_url(entry, rel)
-    verified = "not checked"
+    outbox_url, problem = _outbox_deliver(target, "image", note="屏幕截图")
+    if outbox_url:
+        return outbox_url
+    entry, share, start_problem = _ensure_server(port)
+    if entry is None:
+        return ("could not deliver the screenshot to the chat client (%s) and the folder server "
+                "did not start either (%s)" % (problem, start_problem))
+    os.makedirs(share, exist_ok=True)
+    fallback = _free_name(share, wanted)
     try:
-        probe = url.replace(urllib.parse.urlsplit(url).hostname, "127.0.0.1")
-        with urllib.request.urlopen(probe, timeout=8) as resp:
-            verified = "HTTP %s, %d bytes" % (resp.status, len(resp.read()))
-    except Exception as exc:  # noqa: BLE001
-        verified = "local check failed: %s" % exc
-    return "\n".join([
-        "screenshot=%s" % target,
-        "size=%dx%d bytes=%d" % (image.size[0], image.size[1], os.path.getsize(target)),
-        "url=%s" % url,
-        "markdown=![screenshot](%s)" % url,
-        "verified=%s" % verified,
-        "phone=open the url on the same Wi-Fi; if it does not load, allow inbound port %d "
-        "(console has an allow-firewall button)" % entry["port"],
-        "note=send the markdown line to the user, it renders inline in most clients",
-    ])
+        image.save(fallback, format="PNG")
+    except OSError:
+        pass
+    rel = "/".join([SHARE_DIR_NAME, os.path.basename(fallback)])
+    return ("outbox unavailable (%s); this link works in a browser on the same Wi-Fi but the chat "
+            "client will show it as text:\n%s" % (problem, _entry_url(entry, rel)))
 
 
-@srv.tool("share_file", "Copy a file into the active share folder and return its download URL.",
+@srv.tool("share_file", "Hand the user a download link the chat client can actually open "
+                        "(delivered through the phone-facing outbox); also copies the file into the "
+                        "folder server so a browser can grab it.",
           {"type": "object", "properties": {"path": {"type": "string"}, "name": {"type": "string", "default": ""}}, "required": ["path"]})
 def share_file(path, name=""):
     src = _abs(path)
     if not os.path.isfile(src):
         raise FileNotFoundError(src)
+    ext = os.path.splitext(src)[1].lower()
+    kind = {".png": "image", ".jpg": "image", ".jpeg": "image", ".gif": "image", ".webp": "image",
+            ".wav": "audio", ".mp3": "audio", ".m4a": "audio",
+            ".mp4": "video", ".mkv": "video", ".webm": "video",
+            ".zip": "archive", ".7z": "archive", ".rar": "archive"}.get(ext, "file")
+    outbox_url, problem = _outbox_deliver(src, kind, note=os.path.basename(src))
+    if outbox_url:
+        return outbox_url
     entry, share = _share_root()
     if share is None:
-        return ("no http server running: start one first, e.g. serve_dir(root=%r, port=8811) "
-                "then call share_file again" % os.path.dirname(src))
+        return ("could not deliver to the chat client (%s) and no folder server is running; "
+                "start one with serve_dir(root=%r)" % (problem, os.path.dirname(src)))
     os.makedirs(share, exist_ok=True)
     target = _free_name(share, os.path.basename(str(name).strip()) or os.path.basename(src))
     with open(src, "rb") as fh_in, open(target, "wb") as fh_out:
@@ -382,18 +411,17 @@ def share_file(path, name=""):
         target, url, os.path.getsize(target), entry["port"], entry["port"])
 
 
-@srv.tool("download_to_share", "Fetch a URL into the active share folder and return its download URL.",
+@srv.tool("download_to_share", "Fetch a URL from the internet and hand the user a link the chat client "
+                                "can open (delivered through the phone-facing outbox).",
           {"type": "object", "properties": {"url": {"type": "string"}, "name": {"type": "string", "default": ""}}, "required": ["url"]})
 def download_to_share(url, name=""):
     entry, share = _share_root()
-    if share is None:
-        return ("no http server running: start one first, e.g. serve_dir(root=%r, port=8811) "
-                "then call download_to_share again" % sample_dir())
-    os.makedirs(share, exist_ok=True)
+    staging = share or os.path.join(SHOT_ROOT, "downloads")
+    os.makedirs(staging, exist_ok=True)
     raw_name = str(name or "").strip()
     if not raw_name:
         raw_name = os.path.basename(urllib.parse.urlsplit(str(url)).path) or "download.bin"
-    target = _free_name(share, raw_name)
+    target = _free_name(staging, raw_name)
     req = urllib.request.Request(str(url), headers={"User-Agent": UA})
     with urllib.request.urlopen(req, timeout=120) as resp, open(target, "wb") as fh:
         while True:
@@ -401,6 +429,16 @@ def download_to_share(url, name=""):
             if not chunk:
                 break
             fh.write(chunk)
+    ext = os.path.splitext(target)[1].lower()
+    kind = {".png": "image", ".jpg": "image", ".jpeg": "image", ".gif": "image", ".webp": "image",
+            ".wav": "audio", ".mp3": "audio", ".mp4": "video", ".webm": "video"}.get(ext, "file")
+    outbox_url, problem = _outbox_deliver(target, kind, note=os.path.basename(target))
+    if outbox_url:
+        return outbox_url
+    if share is None:
+        return ("downloaded %d bytes to %s, but could not deliver it to the chat client (%s); "
+                "start a folder server with serve_dir(root=%r) if you need the old route"
+                % (os.path.getsize(target), target, problem, os.path.dirname(target)))
     rel = "/".join([SHARE_DIR_NAME, os.path.basename(target)])
     out_url = _entry_url(entry, rel)
     return "saved=%s\nurl=%s\nsource=%s\nbytes=%d\nport=%d" % (
