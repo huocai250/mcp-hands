@@ -314,10 +314,17 @@ class Console(Tk):
 
         tools = ttk.LabelFrame(body, text="启用的工具服务", padding=8)
         tools.pack(fill=X, pady=(2, 4))
+        roots_row = ttk.Frame(tools)
+        roots_row.grid(row=0, column=0, columnspan=7, sticky="ew", pady=(0, 4))
+        ttk.Label(roots_row, text="文件根目录（; 分隔，权限边界）").pack(side=LEFT)
+        self.fs_roots = StringVar()
+        ttk.Entry(roots_row, textvariable=self.fs_roots).pack(side=LEFT, fill=X, expand=True, padx=4)
+        ttk.Label(roots_row, text="留空=只允许用户主目录；加 D:\\ 这类盘符即可访问整盘", foreground="#888").pack(side=LEFT)
         for index, name in enumerate(SERVERS):
             var = BooleanVar()
             self.server_vars[name] = var
-            ttk.Checkbutton(tools, text=name, variable=var).grid(row=index // 7, column=index % 7, sticky=W, padx=4)
+            ttk.Checkbutton(tools, text=name, variable=var).grid(
+                row=1 + index // 7, column=index % 7, sticky=W, padx=4)
 
         log_box = ttk.LabelFrame(paned, text="运行日志", padding=6)
         paned.add(log_box, weight=4)
@@ -487,6 +494,8 @@ class Console(Tk):
         self.vision_model.set(vision.get("model") or "deepseek-flash")
         self.vision_key.set(vision.get("api_key") or "")
         self.vision_inherit.set(bool(vision.get("inherit_upstream_key", True)))
+        fs_entry = next((s for s in self.config.get("servers", []) if s.get("name") == "fs"), {})
+        self.fs_roots.set(str((fs_entry.get("env") or {}).get("MCP_FS_ROOTS") or ""))
         enabled = {s.get("name") for s in self.config.get("servers", []) if s.get("enabled", True) is not False}
         for name, var in self.server_vars.items():
             var.set(name in enabled)
@@ -703,6 +712,13 @@ class Console(Tk):
         vision.setdefault("detail", "auto")
         vision.setdefault("max_pixels", 1300)
         by_name = {s["name"]: s for s in cfg.get("servers", [])}
+        roots = self.fs_roots.get().strip()
+        fs_entry = by_name.setdefault("fs", {"name": "fs"})
+        fs_entry.setdefault("env", {})
+        if roots:
+            fs_entry["env"]["MCP_FS_ROOTS"] = roots      # path sandbox boundary
+        else:
+            fs_entry["env"].pop("MCP_FS_ROOTS", None)
         for name, var in self.server_vars.items():
             by_name.setdefault(name, {"name": name})["enabled"] = bool(var.get())
         for name in SERVERS:  # keep server entries stable and ordered

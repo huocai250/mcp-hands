@@ -23,10 +23,29 @@ def _check(path):
                 return p
         except ValueError:
             continue  # different drive
-    raise PermissionError("path outside allowed roots %s: %s" % (ROOTS, p))
+    # Point at the exact fix instead of just refusing: the roots come from the config.
+    raise PermissionError(
+        "%s is outside the allowed roots (%s). Ask the user to add that folder in the console "
+        "(文件根目录 field) or to MCP_FS_ROOTS in bridge.config.json; call fs_roots to see the list."
+        % (p, "; ".join(ROOTS)))
+
+
+def _drive_of(path):
+    return os.path.splitdrive(os.path.abspath(path))[0].upper()
 
 
 srv = Server("fs")
+
+
+@srv.tool("fs_roots", "Which folders this tool is allowed to touch (before trying to read somewhere).",
+          {"type": "object", "properties": {}, "required": []})
+def fs_roots():
+    existing = []
+    for root in ROOTS:
+        existing.append("%s%s" % (root, "" if os.path.isdir(root) else " (missing)"))
+    return ("allowed roots (%d):\n%s\nnote=路径沙箱来自配置里的 MCP_FS_ROOTS；需要别的盘/"
+            "目录就让用户在控制台的「文件根目录」里加上，或直接改配置后重启。"
+            % (len(existing), "\n".join(existing)))
 
 
 @srv.tool("list_dir", "List entries of a directory (name/type/size).",
@@ -272,6 +291,7 @@ _SAMPLE_FILE = os.path.join(_SAMPLE_DIR, "sample.txt")
 SAMPLES = {
     # writer first: the readers below depend on this file existing
     "write_text": {"path": _SAMPLE_FILE, "content": "aiyu self-test sample\nsecond line\n"},
+    "fs_roots": {},
     "list_dir": {"path": _SAMPLE_ROOT},
     "read_text": {"path": _SAMPLE_FILE},
     "file_info": {"path": _SAMPLE_FILE},
