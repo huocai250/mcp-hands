@@ -241,6 +241,8 @@ scripts → 根目录      build-exe.ps1 / run-bridge.ps1 / stop-bridge.ps1 / st
 * 不需要的 server 在 GUI 里直接取消勾选（`"enabled": false`）；
 * 别把 8890/8877 暴露到公网。
 
+**关于密钥**：`bridge.config.json`（含上游 key、手机 App 的 key、局域网 IP）与运行日志 `bridge.log` 都只存在于你本机，`.gitignore` 已排除，发布包也不包含它们。日志里的 `api_key` 参数会自动打码（`sk-9c0…ff1d`），不会写进明文——但你本机旧的日志若产生于 v1.1.5 之前，里面可能留有完整 key，介意的话删掉 `bridge.config.json`/`bridge.log` 或轮换一次 key 即可。
+
 ## License
 
 MIT License，见 [LICENSE](LICENSE)。版权归 **huocai250** 所有；可自由使用、修改、分发与商用，保留版权声明即可。

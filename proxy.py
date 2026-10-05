@@ -222,6 +222,23 @@ def sanitize(messages):
     return cleaned
 
 
+_SECRET_HINTS = ("api_key", "apikey", "authorization", "token", "password", "secret")
+
+
+def mask_args(args):
+    """Never let a secret reach the log file (the log is plain text on disk)."""
+    if not isinstance(args, dict):
+        return args
+    safe = {}
+    for key, value in args.items():
+        flagged = any(hint in str(key).lower() for hint in _SECRET_HINTS)
+        if flagged and isinstance(value, str) and value:
+            safe[key] = (value[:6] + "…" + value[-4:]) if len(value) > 12 else "***"
+        else:
+            safe[key] = value
+    return safe
+
+
 def native_tools(hub):
     tools = []
     for spec in hub.specs:
@@ -313,7 +330,7 @@ def run_tool_loop(body, auth):
             for call in fallback:
                 args = vision_args(call["name"], bridge.coerce_args(call["name"], call["arguments"]), auth)
                 output, is_error = hub.call(call["name"], args)
-                log("  tool -> %s %s" % (call["name"], json.dumps(args, ensure_ascii=False)[:200]))
+                log("  tool -> %s %s" % (call["name"], json.dumps(mask_args(args), ensure_ascii=False)[:200]))
                 log("  tool <- %s %s (%d chars)" % (call["name"], "ERROR" if is_error else "ok", len(output)))
                 steps.append({"tool": call["name"], "arguments": args, "error": is_error, "output": output[:4000]})
                 results.append("TOOL_RESULT: %s %s\n%s" % (call["name"], "(failed)" if is_error else "(ok)", output[:6000]))
@@ -330,7 +347,7 @@ def run_tool_loop(body, auth):
                 args = {"raw": raw}
             args = vision_args(name, args, auth)
             output, is_error = hub.call(name, args)
-            log("  tool -> %s %s" % (name, json.dumps(args, ensure_ascii=False)[:200]))
+            log("  tool -> %s %s" % (name, json.dumps(mask_args(args), ensure_ascii=False)[:200]))
             log("  tool <- %s %s (%d chars)" % (name, "ERROR" if is_error else "ok", len(output)))
             steps.append({"tool": name, "arguments": args, "error": is_error, "output": output[:4000]})
             messages.append({"role": "tool", "tool_call_id": call.get("id") or name,
