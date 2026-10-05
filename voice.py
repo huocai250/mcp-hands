@@ -158,9 +158,19 @@ class VoiceQueue:
         with self._lock:
             lines = list(self._data["lines"])
             calls = list(self._data["calls"])
+        opened = [item for item in calls if item.get("event") == "page_open"]
+        started = [item for item in calls if item.get("event") == "start"]
         return {"lines": len(lines),
                 "unspoken": len([l for l in lines if l.get("kind") == "say" and not l.get("spoken")]),
                 "unread_heard": len([l for l in lines if l.get("kind") == "heard" and not l.get("read")]),
                 "calls": len(calls),
                 "last": (calls[-1]["event"] if calls else ""),
+                # Two different questions: has the phone ever loaded the page, and did the
+                # user actually tap 开始通话 (which is what unlocks autoplay).
+                "page_opened": bool(opened),
+                "page_opened_at": (opened[-1]["at"] if opened else 0),
+                "connected": bool(started),
+                "connected_at": (started[-1]["at"] if started else 0),
+                "last_event": (calls[-1].get("event") if calls else ""),
+                "last_event_at": (calls[-1].get("at") if calls else 0),
                 "active_hint": (lines[-1]["at"] if lines else 0)}

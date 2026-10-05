@@ -73,6 +73,23 @@ def call_listen(mark=True):
     return "\n".join("用户说(#%s)：%s" % (item.get("seq"), item.get("text")) for item in heard)
 
 
+@srv.tool("call_invite", "Hand the user a QR code for the voice page: they scan it with the phone, tap "
+                         "«开始通话» once, and then you can speak. Use this the first time.",
+          {"type": "object", "properties": {"note": {"type": "string", "default": "扫码接通语音"}},
+           "required": []})
+def call_invite(note="扫码接通语音"):
+    base, error = _api("/v2/voice?since=0")
+    if error:
+        return "could not read the voice channel: %s" % error
+    url = "%s/voice" % API
+    data, error = _api("/v2/outbox", {"text": url, "kind": "qr", "note": note}, method="POST")
+    if error:
+        # fall back: ask the bridge to build the QR from the page url itself
+        return ("语音页地址：%s\n（二维码生成失败：%s；把链接单独发一条给用户，他在手机上打开即可）"
+                % (url, error))
+    return (data.get("item") or {}).get("url") or url
+
+
 @srv.tool("call_state", "Is the voice page connected, how many lines were spoken, anything unread.",
           {"type": "object", "properties": {}, "required": []})
 def call_state():
@@ -81,6 +98,11 @@ def call_state():
         return "could not read the voice channel: %s" % error
     stats = dict(data.get("stats") or {})
     stats["url"] = "%s/voice" % API
+    if not stats.get("page_opened"):
+        stats["hint"] = ("手机从来没打开过语音页：先用 call_invite 把二维码发给他，"
+                         "他扫码打开页面并点「开始通话」你就能说话了")
+    elif not stats.get("connected"):
+        stats["hint"] = "页面打开过但没点「开始通话」：提醒用户点一下那个按钮（点了才会自动出声）"
     return json.dumps(stats, ensure_ascii=False, indent=2)
 
 

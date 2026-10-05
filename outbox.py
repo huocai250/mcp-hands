@@ -82,12 +82,29 @@ class Outbox:
         return record
 
     def add_bytes(self, data, name="item.bin", kind="file", ttl=None, once=False, note=""):
-        """Same as add(), for bytes the caller already has in memory."""
+        """Same as add(), for bytes the caller already has in memory.
+
+        The extension matters: `serve_outbox` picks the Content-Type from the stored
+        file's suffix, and without it a QR image went out as application/octet-stream,
+        which picky phone loaders refuse.
+        """
         incoming = os.path.join(self.files, "incoming_" + uuid.uuid4().hex[:8])
+        suffix = os.path.splitext(str(name or ""))[1].lower()[:10]
         try:
             with open(incoming, "wb") as fh:
                 fh.write(data)
             record = self.add(incoming, kind=kind, ttl=ttl, once=once, note=note)
+            if suffix and not record["stored"].lower().endswith(suffix):
+                wanted = record["stored"] + suffix
+                try:
+                    os.replace(record["stored"], wanted)
+                    record["stored"] = wanted
+                    with self._lock:
+                        if record["id"] in self._index:
+                            self._index[record["id"]]["stored"] = wanted
+                            self._save()
+                except OSError:
+                    pass
             if name:
                 record["name"] = str(name)
                 with self._lock:

@@ -35,12 +35,12 @@ sys.path.insert(0, HERE)
 
 # ------------------------------------------------------------------ branding
 APP_NAME = "mcp-hands"
-APP_VERSION = "4.1.2"
+APP_VERSION = "4.2.0"
 APP_AUTHOR = "huocai250"
 APP_URL = "https://github.com/huocai250/mcp-hands"
 APP_REPO = "huocai250/mcp-hands"
 APP_LICENSE = "MIT"
-APP_TAGLINE = "把手机里的人设接上电脑的 380 个工具：会看图、能出声、能干长活、能被审计"
+APP_TAGLINE = "把手机里的人设接上电脑的 381 个工具：会看图、能扫码通话、能干长活、能被审计"
 
 
 def version_line():
@@ -1346,6 +1346,7 @@ def voice_api(handler, method):
         return
     if tail == "call":
         voice_queue().call_event(body.get("event", ""), body.get("note", ""))
+        log("voice: call event %r%s" % (body.get("event", ""), (" (%s)" % body.get("note")) if body.get("note") else ""))
         handler._json({"stats": voice_queue().stats()})
         return
     if tail == "clear":
@@ -1360,6 +1361,10 @@ def serve_voice_page(handler):
                                             "because the bridge is reachable on the LAN",
                                  "type": "control_token_required"}}, 401)
         return
+    # Without this line the log cannot answer "did the phone ever open the page?".
+    ip = handler.client_address[0] if getattr(handler, "client_address", None) else "?"
+    voice_queue().call_event("page_open", "from %s" % ip)
+    log("voice: page opened from %s" % ip)
     body = VOICE_HTML.encode("utf-8")
     handler.send_response(200)
     handler.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1740,8 +1745,27 @@ class Handler(BaseHTTPRequestHandler):
             return
         if route == "outbox":
             path = body.get("path")
+            text = str(body.get("text") or "")
+            if not path and text:
+                # No file, just text: build a QR for it (used by call_invite, links, wifi…)
+                try:
+                    import io as _io
+                    import qrcode
+                    buffer = _io.BytesIO()
+                    qrcode.make(text).save(buffer, format="PNG")
+                    record = outbox().add_bytes(buffer.getvalue(), name="qr.png",
+                                                kind=body.get("kind") or "qr",
+                                                ttl=body.get("ttl"), note=body.get("note", ""))
+                except Exception as exc:  # noqa: BLE001
+                    self._json({"error": {"message": "could not build a QR: %s" % exc}}, 400)
+                    return
+                record = dict(record, url="%s/out/%s" % (self._outbox_base(), record["token"]))
+                log("outbox added %s (qr for %d chars)" % (record["id"], len(text)))
+                self._json({"item": record}, 201)
+                return
             if not path:
-                self._json({"error": {"message": "give me a path (and optionally kind/ttl/once/note)"}}, 400)
+                self._json({"error": {"message": "give me a path (or text to turn into a QR), "
+                                                 "plus optionally kind/ttl/once/note"}}, 400)
                 return
             try:
                 record = outbox().add(path, kind=body.get("kind") or "file",

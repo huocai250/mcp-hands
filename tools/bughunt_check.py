@@ -35,6 +35,10 @@ BRIDGE_PORT = 8881
 PROXY_PORT = 8899
 
 os.makedirs(STATE, exist_ok=True)
+for stale in ("voice.json", "devices.json"):
+    path = os.path.join(STATE, stale)
+    if os.path.exists(path):        # deterministic runs: no state from the last attempt
+        os.remove(path)
 with open(CONFIG, "w", encoding="utf-8") as fh:
     json.dump({
         "listen": {"host": "127.0.0.1", "port": BRIDGE_PORT},
@@ -69,6 +73,12 @@ def report(number, title, broken, detail=""):
 def get(path, timeout=20):
     with urllib.request.urlopen("http://127.0.0.1:%d%s" % (BRIDGE_PORT, path), timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8", "replace") or "{}")
+
+
+def local_url(url):
+    """Fetch through loopback: the advertised host is the LAN address for the phone."""
+    parts = urllib.parse.urlsplit(url)
+    return "http://127.0.0.1:%s%s" % (parts.port or 80, parts.path)
 
 
 def post(path, payload, timeout=60):
@@ -379,6 +389,33 @@ if merge:
 else:
     report(21, "console save merges with disk instead of reverting it", True, "gui_config_merge unavailable")
     report(22, "an edited fs-roots field is the one thing that may overwrite disk", True, "gui_config_merge unavailable")
+
+# 23. the voice invite: text -> QR image -> a link the client can draw
+qr = post("/v2/outbox", {"text": "http://example.test/voice", "kind": "qr", "note": "接通语音"})
+qr_url = (qr.get("item") or {}).get("url") or ""
+served = ""
+if qr_url:
+    try:
+        with urllib.request.urlopen(local_url(qr_url), timeout=15) as resp:
+            served = resp.headers.get("Content-Type", "")
+    except Exception as exc:  # noqa: BLE001
+        served = "error: %s" % exc
+report(23, "a QR can be built from plain text and served as an image",
+       not (qr_url and "/out/" in qr_url and served.startswith("image/")),
+       "url=%s type=%s" % (qr_url[:60], served))
+
+# 24. the voice channel reports whether the phone ever connected
+stats = get("/v2/voice?since=0")["stats"]
+page_visit = urllib.request.urlopen("http://127.0.0.1:%d/voice" % BRIDGE_PORT, timeout=10).read()
+after_stats = get("/v2/voice?since=0")["stats"]
+report(24, "opening the voice page is recorded (page_opened / connected split)",
+       not (after_stats.get("page_opened") is True and after_stats.get("last_event") == "page_open"
+            and after_stats.get("connected") in (True, False)
+            and ("connected" or after_stats.get("calls", 0) >= 1)),
+       "page_opened=%s connected=%s event=%s calls=%s" % (after_stats.get("page_opened"),
+                                                          after_stats.get("connected"),
+                                                          after_stats.get("last_event"),
+                                                          after_stats.get("calls")))
 
 service.stop()
 server.shutdown()

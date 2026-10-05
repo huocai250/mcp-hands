@@ -169,7 +169,7 @@ powershell -ExecutionPolicy Bypass -File .\build-exe.ps1 -OneFile # 单文件
 | `audit` | 3 | **审计与策略查询**：audit_tail（最近调用了什么、参数、耗时、成功与否）/ audit_stats（窗口统计、最忙工具、各身份分布）/ policy_status（当前策略允许与禁止了什么） |
 | `send` | 8 | **媒体出口**：send_screen（截屏发过去）/ send_image / send_file / send_text / send_qr（二维码）/ send_voice（**文字转语音**，可同时在电脑上念出来）/ outbox_list / outbox_clean——链接签名、会过期、可选择一次即失效 |
 | `device` | 3 | **设备与配对（只读）**：devices_list（已批准设备、何时加入、最近活动、调用次数）/ devices_pending（等待批准的连接请求）/ devices_stats；批准与撤销在控制台或 `--devices-approve` 完成 |
-| `call` | 4 | **语音通话**：call_say（让**手机自己念出来**，不用音频文件）/ call_listen（读用户在语音页里说的话）/ call_state（通道状态）/ call_clear；手机浏览器打开 `http://电脑:8890/voice` 点一次「开始通话」即可 |
+| `call` | 5 | **语音通话**：call_invite（发一张**语音页二维码**，手机扫码接通）/ call_say（让**手机自己念出来**，不用音频文件）/ call_listen（读用户在语音页里说的话）/ call_state（有没有连上）/ call_clear |
 
 ## 写一个自己的 MCP server
 
