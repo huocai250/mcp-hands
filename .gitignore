@@ -1,0 +1,25 @@
+# build artifacts
+.build-venv/
+build/
+release/
+dist/
+*.spec
+
+# python
+__pycache__/
+*.py[cod]
+
+# runtime state (machine specific)
+bridge.config.json
+bridge.log
+proxy.log
+gui-settings.json
+.aiyu_selftest/
+.aiyu_self_samples/
+*.zip
+
+# editors / os
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

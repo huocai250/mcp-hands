@@ -1,0 +1,57 @@
+{
+  "listen": { "host": "127.0.0.1", "port": 8878 },
+  "upstream": {
+    "name": "mock-persona",
+    "base_url": "http://127.0.0.1:8899/v1",
+    "api_key": "mock",
+    "model": "mock-persona",
+    "timeout_s": 60,
+    "temperature": null
+  },
+  "tool_mode": "text-protocol",
+  "always_expose_tools": true,
+  "max_tool_rounds": 4,
+  "upstream_history": "last_user_only",
+  "include_client_system": false,
+  "proxy": {
+    "enabled": false,
+    "listen": { "host": "127.0.0.1", "port": 8892 },
+    "upstream_base": "http://127.0.0.1:8891/v1",
+    "upstream_api_key": "mock",
+    "tool_models": ["mock-native"],
+    "max_tool_rounds": 6,
+    "inject_tool_hint": true
+  },
+  "servers": [
+    {
+      "name": "fs",
+      "enabled": true,
+      "env": {
+        "MCP_FS_ROOTS": "%USERPROFILE%\\\\Documents;%USERPROFILE%\\\\Desktop"
+      }
+    },
+    { "name": "shell", "enabled": true },
+    { "name": "web", "enabled": true },
+    { "name": "sys", "enabled": true },
+    { "name": "office", "enabled": true },
+    { "name": "media", "enabled": true },
+    { "name": "archive", "enabled": true },
+    { "name": "sqlite", "enabled": true },
+    { "name": "desktop", "enabled": true },
+    { "name": "voice", "enabled": true },
+    { "name": "monitor", "enabled": true },
+    { "name": "net", "enabled": true },
+    { "name": "dev", "enabled": true },
+    { "name": "forensics", "enabled": true },
+    { "name": "text", "enabled": true },
+    { "name": "pdf", "enabled": true },
+    { "name": "qr", "enabled": true },
+    { "name": "backup", "enabled": true },
+    { "name": "http", "enabled": true },
+    { "name": "media2", "enabled": true },
+    { "name": "sched", "enabled": true },
+    { "name": "soft", "enabled": true },
+    { "name": "registry", "enabled": true },
+    { "name": "netadv", "enabled": true }
+  ]
+}

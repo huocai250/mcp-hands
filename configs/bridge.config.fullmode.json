@@ -1,0 +1,21 @@
+{
+  "listen": { "host": "127.0.0.1", "port": 8879 },
+  "upstream": {
+    "name": "mock-persona",
+    "base_url": "http://127.0.0.1:8899/v1",
+    "api_key": "mock",
+    "model": "mock-persona",
+    "timeout_s": 60,
+    "temperature": null
+  },
+  "tool_mode": "text-protocol",
+  "always_expose_tools": true,
+  "max_tool_rounds": 4,
+  "upstream_history": "full",
+  "include_client_system": true,
+  "proxy": { "enabled": false, "listen": { "host": "127.0.0.1", "port": 8893 } },
+  "servers": [
+    { "name": "fs", "enabled": true, "env": { "MCP_FS_ROOTS": "%USERPROFILE%\\\\Desktop;%USERPROFILE%\\\\Documents" } },
+    { "name": "shell", "enabled": true }
+  ]
+}

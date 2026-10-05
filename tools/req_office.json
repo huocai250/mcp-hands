@@ -1,0 +1,10 @@
+{
+  "model": "aiyu-proxy",
+  "stream": false,
+  "messages": [
+    {
+      "role": "user",
+      "content": "帮我在桌面新建一个 Word 文档叫 aiyu_demo.docx，标题写「你好AIYU」，正文写一行「这是通过 MCP 生成的文档」；再建一个 Excel 表格叫 aiyu_demo.xlsx，里面三行数据：name/qty 各一行。做完把两个文件的完整路径告诉我。"
+    }
+  ]
+}
