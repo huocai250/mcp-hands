@@ -46,7 +46,22 @@ class Handler(BaseHTTPRequestHandler):
         user_text = last_of(messages, "user").get("content") or ""
         offered = [t["function"]["name"] for t in (body.get("tools") or [])]
 
-        if "LOOP:" in user_text:
+        if "CYCLE:" in user_text:
+            # Rotate through several tools so distinct progress labels are produced.
+            # Form: CYCLE: tool1,tool2,tool3 <total>
+            line = [l for l in user_text.splitlines() if "CYCLE:" in l][0]
+            spec = line.split("CYCLE:")[1].strip().split()
+            tools = [t for t in spec[0].split(",") if t]
+            total = int(spec[1]) if len(spec) > 1 else 6
+            done = sum(1 for m in messages if m.get("role") == "tool")
+            if done < total:
+                pick = tools[done % len(tools)]
+                message = {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "call_%d" % int(time.time() * 1000), "type": "function",
+                     "function": {"name": pick, "arguments": "{}"}}]}
+            else:
+                message = {"role": "assistant", "content": "轮换动作做完了，共 %d 步。" % done}
+        elif "LOOP:" in user_text:
             # Keep calling a tool until N tool results exist: exercises long chains and
             # the round budget without needing a real model. Checked first, because a
             # tool result is already in the history after the first round.

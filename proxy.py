@@ -92,6 +92,8 @@ TOOL_HINT = """你在操作一台真实的 Windows 电脑，下面这些工具�
 
 【5 待办与下一步】多步任务先用 notes_todo_add 记下待办，做完一步用 notes_todo_done 勾掉；一件事做完要主动给出下一步或问一句，不要原地停住等派活。
 
+【5b 节奏】用户等的是你的反应，不是状态条：一小段动作做完（大约 6-8 步、或一分钟左右）就先说话——汇报看到了什么、给一句评价、说下一步要干什么，然后再继续。别一口气跑到轮次上限才开口，那样对面会觉得你在装死。这一轮最多 %(rounds)s 轮 / %(seconds)s 秒，到点我会替你收尾。
+
 【6 记忆】用户提到「昨天」「上次」「之前」「我说过」之类，先 notes_memory_recent 或 notes_note_search 查一遍再回答，不要凭印象猜。
 
 【7 主动开口】你不能主动在手机 App 里发消息（App 没有推送通道），也绝不许谎称你发过。要主动找用户就走电脑通道：立刻提醒用 sys_toast 或 voice_toast_speak（后者会念出来）；定时提醒用 remind_in(minutes=数字, text="要说的话") 或 remind_at(time="18:30", text="...")；查已排的提醒用 remind_list。
@@ -152,25 +154,27 @@ def _digest(output, limit=140):
 
 
 # Short, human progress lines so the phone shows something while slow tools run.
+# Curated on purpose: exposing a raw tool name reads like a machine log.
 PROGRESS_MAP = (
-    ("vision_see", "正在看屏幕"), ("vision_read_screen", "正在读屏幕上的字"),
-    ("vision_", "正在看图"), ("desktop_", "正在操作桌面"), ("http_", "正在准备分享链接"),
+    ("sys_now", "正在看时间"), ("sys_screenshot", "正在截图"), ("screenshot", "正在截图"),
+    ("read_screen_region", "正在截图"), ("list_windows", "正在找窗口"),
+    ("focus_window", "正在切窗口"), ("mouse_", "正在动手"), ("press_keys", "正在按键"),
+    ("vision_read_screen", "正在读屏幕上的字"), ("vision_see_screen", "正在看屏幕"),
+    ("vision_sight", "正在确认眼睛"), ("vision_share", "正在整理图片"),
+    ("vision_", "正在看图"), ("http_", "正在整理图片"), ("desktop_", "正在操作桌面"),
     ("shell_", "正在执行命令"), ("fs_", "正在读写文件"), ("web_", "正在上网查"),
-    ("office", "正在处理 Office 文件"), ("media", "正在处理图片/媒体"),
-    ("sched_", "正在安排任务"), ("notes_", "正在记下来"), ("pwd_", "正在生成密钥"),
+    ("office", "正在处理文档"), ("media", "正在处理图片"), ("sched_", "正在排提醒"),
+    ("remind_", "正在排提醒"), ("notes_", "正在记下来"), ("pwd_", "正在算"),
     ("net", "正在检查网络"), ("registry", "正在读注册表"), ("sqlite", "正在查数据库"),
+    ("voice", "正在出声"), ("monitor", "正在看系统状态"),
 )
 
 
 def progress_text(tool_name, error=False):
-    label = None
     for prefix, text in PROGRESS_MAP:
         if str(tool_name).startswith(prefix) or prefix in str(tool_name):
-            label = text
-            break
-    if label is None:
-        label = "正在使用 %s" % str(tool_name).split("_", 1)[-1]
-    return "（%s%s…）\n" % (label, "，出错了换个办法" if error else "")
+            return "（%s%s…）\n" % (text, "，卡住了换个办法" if error else "")
+    return "（正在动手%s…）\n" % ("，卡住了换个办法" if error else "")
 
 
 def step_report(steps, mode="brief", limit=8):
@@ -324,8 +328,8 @@ def run_tool_loop(body, auth, on_event=None):
     steps = []
     message = {}
     cfg = proxy_cfg()
-    rounds = max(1, int(cfg.get("max_tool_rounds", 40) or 40))
-    budget = float(cfg.get("max_seconds", 420) or 0)
+    rounds = max(1, int(cfg.get("max_tool_rounds", 12) or 12))
+    budget = float(cfg.get("max_seconds", 120) or 0)
     started = time.time()
     for round_no in range(rounds + 1):
         elapsed = time.time() - started
@@ -466,10 +470,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
         started = time.time()
 
         seen = set()
+        limit = int(proxy_cfg().get("progress_max", 3) or 0)
 
         def on_event(tool_name, is_error):
-            """Push a visible progress line so the user sees work happening, not silence."""
+            """Push a visible progress line so the user sees work happening, not silence.
+
+            Capped: a long loop must not turn the chat into a wall of status bubbles -
+            the point is to show liveness, then let the real reply arrive.
+            """
             if not proxy_cfg().get("progress_stream", True):
+                return
+            if limit and len(seen) >= limit:
                 return
             line = progress_text(tool_name, is_error)
             if line.strip() in seen:

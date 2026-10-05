@@ -32,7 +32,7 @@ sys.path.insert(0, HERE)
 
 # ------------------------------------------------------------------ branding
 APP_NAME = "mcp-hands"
-APP_VERSION = "1.1.6"
+APP_VERSION = "1.1.7"
 APP_AUTHOR = "huocai250"
 APP_URL = "https://github.com/huocai250/mcp-hands"
 APP_LICENSE = "MIT"
@@ -180,12 +180,13 @@ def load_config():
     cfg.setdefault("always_expose_tools", True)
     # Keep old config files working: new proxy knobs get sane defaults here.
     proxy = cfg.setdefault("proxy", {})
-    proxy.setdefault("max_tool_rounds", 40)
-    proxy.setdefault("max_seconds", 420)
+    proxy.setdefault("max_tool_rounds", 12)
+    proxy.setdefault("max_seconds", 120)
     proxy.setdefault("heartbeat_seconds", 5)
     proxy.setdefault("vision_check_seconds", 600)
     proxy.setdefault("step_report", "brief")
     proxy.setdefault("progress_stream", True)
+    proxy.setdefault("progress_max", 3)
     cfg.setdefault("vision", {}).setdefault("thinking", "disabled")
     return cfg
 
